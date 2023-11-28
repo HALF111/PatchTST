@@ -11,9 +11,10 @@ import numpy as np
 #from collections import OrderedDict
 from layers.PatchTST_layers import *
 from layers.RevIN import RevIN
+from layers.mixture_of_experts import MoE
 
 # Cell
-class PatchTST_backbone(nn.Module):
+class PatchTST_backbone_head_MoE(nn.Module):
     def __init__(self, c_in:int, context_window:int, target_window:int, patch_len:int, stride:int, max_seq_len:Optional[int]=1024, 
                  n_layers:int=3, d_model=128, n_heads=16, d_k:Optional[int]=None, d_v:Optional[int]=None,
                  d_ff:int=256, norm:str='BatchNorm', attn_dropout:float=0., dropout:float=0., act:str="gelu", key_padding_mask:bool='auto',
@@ -49,6 +50,20 @@ class PatchTST_backbone(nn.Module):
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
                                 pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
+
+        # MoE on d_model dimension
+        self.moe = MoE(
+            # input_size=self.head_nf,
+            input_size=d_model,
+            output_size=d_model,
+            num_experts=4,
+            # num_experts=self.seq_len_nums,
+            hidden_size=d_ff, # 这里暂定为target_window的2倍
+            noisy_gating=True,
+            # noisy_gating=False,
+            k=2
+            # k=self.seq_len_nums//2
+        )
 
         # Head
         # 也即最后一个"展平 & 线性层"
@@ -89,6 +104,20 @@ class PatchTST_backbone(nn.Module):
         # model
         # 3、经过encoder主干模型（PS：embedding和位置编码都会在backbone内完成）
         z = self.backbone(z)                                                # z: [bs x nvars x d_model x patch_num]
+        
+        # 3.1 经过MoE层
+        # 注意这里优于我们是对d_model维度做的MoE，所以这里要做permute
+        batch_size, nvars, d_model, patch_num = z.shape
+        z = z.permute(0,1,3,2)
+        # print(z.shape)
+        z = z.reshape(-1, d_model)
+        # print(z.shape)
+        z, aux_loss = self.moe(z)
+        z = z.reshape(batch_size, nvars, patch_num, d_model)
+        # print(z.shape)
+        z = z.permute(0,1,3,2)
+        # print(z.shape)
+        
         # 4、展平 + 线性映射（+dropout）
         z = self.head(z)                                                    # z: [bs x nvars x target_window] 
         
@@ -98,7 +127,8 @@ class PatchTST_backbone(nn.Module):
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'denorm')
             z = z.permute(0,2,1)
-        return z
+        
+        return z, aux_loss
     
     def create_pretrain_head(self, head_nf, vars, dropout):
         # 这里的dropout会使用fc_dropout

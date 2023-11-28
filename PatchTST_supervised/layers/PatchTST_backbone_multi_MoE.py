@@ -11,9 +11,10 @@ import numpy as np
 #from collections import OrderedDict
 from layers.PatchTST_layers import *
 from layers.RevIN import RevIN
+from layers.mixture_of_experts import MoE
 
 # Cell
-class PatchTST_backbone(nn.Module):
+class PatchTST_backbone_multi_MoE(nn.Module):
     def __init__(self, c_in:int, context_window:int, target_window:int, patch_len:int, stride:int, max_seq_len:Optional[int]=1024, 
                  n_layers:int=3, d_model=128, n_heads=16, d_k:Optional[int]=None, d_v:Optional[int]=None,
                  d_ff:int=256, norm:str='BatchNorm', attn_dropout:float=0., dropout:float=0., act:str="gelu", key_padding_mask:bool='auto',
@@ -34,39 +35,73 @@ class PatchTST_backbone(nn.Module):
         self.patch_len = patch_len
         self.stride = stride
         self.padding_patch = padding_patch
+        
+        self.context_window = context_window
+        self.target_window = target_window
+        
+        self.all_seq_lens = [48, 96, 192, 336, 512, 720, 1024] if target_window >= 96 else [60, 72, 80, 96, 104, 144]
+        self.seq_len_lst = [item for item in self.all_seq_lens if item <= context_window]
+        self.seq_len_nums = len(self.seq_len_lst)
+        
         # 获得总的patch数
-        patch_num = int((context_window - patch_len) / stride + 1)
+        # patch_num = int((context_window - patch_len) / stride + 1)
+        self.patch_num_lst = [int((sl - patch_len) / stride + 1) for sl in self.seq_len_lst]
         
         if padding_patch == 'end':  # can be modified to general case
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride)) 
-            patch_num += 1
+            # patch_num += 1
+            self.patch_num_lst = [item + 1 for item in self.patch_num_lst]
         
         # Backbone
         # 核心的Encoder框架
-        # （PS：embedding和位置编码也都会在TSTiEncoder内完成）
-        self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
+        # （PS：embedding和位置编码也都会在TSTiEncoder内完成
+        # self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
+        #                         n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
+        #                         attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
+        #                         attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
+        #                         pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
+        self.backbone_lst = nn.ModuleList([TSTiEncoder(c_in, patch_num=self.patch_num_lst[i], patch_len=patch_len, max_seq_len=max_seq_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
+                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs) for i in range(self.seq_len_nums)])
 
         # Head
         # 也即最后一个"展平 & 线性层"
         # 其将(d_model, patch_num)的输入战平后并映射至(1, pred_len)的输出
-        self.head_nf = d_model * patch_num  # d_model和patch总数的乘积，为encoder的输出
+        # self.head_nf = d_model * patch_num  # d_model和patch总数的乘积，为encoder的输出
+        self.head_nf = d_model * self.patch_num_lst[-1]  # d_model和最大的那个patch总数的乘积，为encoder的输出
+        self.head_nf_lst = [d_model * patch_num for patch_num in self.patch_num_lst]  # d_model和patch总数的乘积，为encoder的输出
+        
         self.n_vars = c_in  # n_vars就设置为channel数
         self.pretrain_head = pretrain_head  # 默认为False
         self.head_type = head_type  # 默认为"flatten"
         self.individual = individual  # 默认为False
 
-        if self.pretrain_head:
-            # 如果要预训练的话，那么改用一个一维卷积的预测头
-            self.head = self.create_pretrain_head(self.head_nf, c_in, fc_dropout)  # custom head passed as a partial func with all its kwargs
-        elif head_type == 'flatten':
-            # 如果不预训练线性层的话，那么调用Flatten_Head
-            # 它会完成：展平 + 线性映射 + dropout （不过这里的dropout默认设置为0）
-            self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
+        # if self.pretrain_head:
+        #     # 如果要预训练的话，那么改用一个一维卷积的预测头
+        #     self.head = self.create_pretrain_head(self.head_nf, c_in, fc_dropout)  # custom head passed as a partial func with all its kwargs
+        # elif head_type == 'flatten':
+        #     # 如果不预训练线性层的话，那么调用Flatten_Head
+        #     # 它会完成：展平 + 线性映射 + dropout （不过这里的dropout默认设置为0）
+        #     self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
         
+        # 这里由于没有预测头，所以flatten和concat和MoE都一起在MoE中完成
+        # flatten + concat + MoE
+        self.flatten = nn.Flatten(start_dim=-2)
+        # self.concat = 
+        input_size = sum([d_model * patch_num for patch_num in self.patch_num_lst])
+        self.moe = MoE(
+            # input_size=self.head_nf,
+            input_size=input_size,
+            output_size=target_window,
+            num_experts=4,
+            hidden_size=target_window*2, # 这里暂定为target_window的2倍
+            # input_list=self.head_nf_lst,
+            noisy_gating=True,
+            # noisy_gating=False,
+            k=2
+        )
     
     def forward(self, z):                                                   # z: [bs x nvars x seq_len]
         # norm
@@ -75,22 +110,52 @@ class PatchTST_backbone(nn.Module):
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'norm')
             z = z.permute(0,2,1)
+        
+        # print(z.shape)
+        
+        # 2、将输入数据z按照seq_len进行切割
+        z_lst = [z[:, :, -length:] for length in self.seq_len_lst]
             
         # do patching
         # 2、做patching分割
         if self.padding_patch == 'end':
-            z = self.padding_patch_layer(z)
+            # z = self.padding_patch_layer(z)
+            z_lst = [self.padding_patch_layer(z) for z in z_lst]
         # unfold函数啊按照选定的尺寸与步长来切分矩阵，相当于滑动窗口操作，也即只有卷、没有积
         # 参数为（dim,size,step）：dim表明想要切分的维度，size表明切分块（滑动窗口）的大小，step表明切分的步长
         # 这里用于从一个分批输入的张量中提取滑动的局部块
-        z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)   # z: [bs x nvars x patch_num x patch_len]
-        z = z.permute(0,1,3,2)                                              # z: [bs x nvars x patch_len x patch_num]
+        z_lst = [z.unfold(dimension=-1, size=self.patch_len, step=self.stride) for z in z_lst]   # z: [bs x nvars x patch_num x patch_len]
+        z_lst = [z.permute(0,1,3,2) for z in z_lst]                                              # z: [bs x nvars x patch_len x patch_num]
+        # print([z.shape for z in z_lst])
         
         # model
         # 3、经过encoder主干模型（PS：embedding和位置编码都会在backbone内完成）
-        z = self.backbone(z)                                                # z: [bs x nvars x d_model x patch_num]
-        # 4、展平 + 线性映射（+dropout）
-        z = self.head(z)                                                    # z: [bs x nvars x target_window] 
+        # z_lst = [self.backbone_lst(z) for z in z_lst]                             # z: [bs x nvars x d_model x patch_num]
+        z_lst = [self.backbone_lst[idx](z) for idx, z in enumerate(z_lst)]
+        # print([z.shape for z in z_lst])
+        
+        # # 4、展平 + 线性映射（+dropout）
+        # z = self.head(z)                                                    # z: [bs x nvars x target_window] 
+        # 4、这里改成展平 + concat + MoE
+        # 4.1 flatten
+        z_lst = [self.flatten(z) for z in z_lst]  # each z: [bs x nvars x d_model*patch_num]
+        # print([z.shape for z in z_lst])
+        # 4.2 concat
+        z = z_lst[0]
+        # print(z.shape)
+        for i in range(1, len(z_lst)):
+            z = torch.cat((z, z_lst[i]), dim=-1)
+            # print(z.shape)
+        
+        # 4.3 MoE
+        batch_size, nvars, input_size = z.shape
+        # print(z.shape)
+        z = z.reshape(-1, input_size)
+        # print(z.shape)
+        z, aux_loss = self.moe(z)
+        # 由于最后一维已经直接是target_window了，所以治理最后一维直接为z.shape[-1]即可
+        z = z.reshape(batch_size, nvars, self.target_window)
+        # print(z.shape)
         
         # denorm
         # 5、再用RevIN做denorm回来
@@ -98,7 +163,9 @@ class PatchTST_backbone(nn.Module):
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'denorm')
             z = z.permute(0,2,1)
-        return z
+        
+        return z, aux_loss
+    
     
     def create_pretrain_head(self, head_nf, vars, dropout):
         # 这里的dropout会使用fc_dropout

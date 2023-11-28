@@ -5,16 +5,22 @@ fi
 if [ ! -d "./logs/LongForecasting" ]; then
     mkdir ./logs/LongForecasting
 fi
-seq_len=104
-model_name=PatchTST
+seq_len=336
+# model_name=PatchTST
+model_name=PatchTST_multi_MoE
+# model_name=PatchTST_head_MoE
 
 root_path_name=./dataset/
-data_path_name=national_illness.csv
-model_id_name=national_illness
-data_name=custom
+data_path_name=ETTh1.csv
+model_id_name=ETTh1
+data_name=ETTh1
 
 random_seed=2021
-for pred_len in 24 36 48 60
+# for seq_len in 96 192 336 720
+for seq_len in 336
+do
+# for pred_len in 96 192 336 720
+for pred_len in 96
 do
     python -u run_longExp.py \
       --random_seed $random_seed \
@@ -35,10 +41,11 @@ do
       --dropout 0.3\
       --fc_dropout 0.3\
       --head_dropout 0\
-      --patch_len 24\
-      --stride 2\
+      --patch_len 16\
+      --stride 8\
       --des 'Exp' \
       --train_epochs 100\
-      --lradj 'constant'\
-      --itr 1 --batch_size 16 --learning_rate 0.0025 >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
+      --itr 1 --batch_size 128 --learning_rate 0.0001 \
+    #   >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
+done
 done

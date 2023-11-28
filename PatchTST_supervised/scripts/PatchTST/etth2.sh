@@ -21,7 +21,7 @@ do
       --is_training 1 \
       --root_path $root_path_name \
       --data_path $data_path_name \
-      --model_id $model_id_name_$seq_len'_'$pred_len \
+      --model_id $model_id_name'_'$seq_len'_'$pred_len \
       --model $model_name \
       --data $data_name \
       --features M \
@@ -31,7 +31,7 @@ do
       --e_layers 3 \
       --n_heads 4 \
       --d_model 16 \
-      --d_ff 128 \
+      --d_ff 64 \
       --dropout 0.3\
       --fc_dropout 0.3\
       --head_dropout 0\

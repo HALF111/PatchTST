@@ -96,7 +96,7 @@ def Coord1dPosEncoding(q_len, exponential=False, normalize=True):
 def positional_encoding(pe, learn_pe, q_len, d_model):
     # Positional encoding
     if pe == None:
-        W_pos = torch.empty((q_len, d_model)) # pe = None and learn_pe = False can be used to measure impact of pe
+        W_pos = torch.empty((q_len, d_model))  # pe = None and learn_pe = False can be used to measure impact of pe
         nn.init.uniform_(W_pos, -0.02, 0.02)
         learn_pe = False
     elif pe == 'zero':
