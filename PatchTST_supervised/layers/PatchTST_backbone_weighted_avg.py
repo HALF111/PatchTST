@@ -9,8 +9,6 @@ import torch.nn.functional as F
 import numpy as np
 
 # https://github.com/luo3300612/Visualizer
-# ! 注意：模型训练时不要调用get_local！！！
-# ! 因为他会存储中间的注意力权重信息，导致这些内存一直没能释放，从而内存泄漏了！！！
 # from visualizer import get_local
 
 #from collections import OrderedDict
@@ -18,7 +16,7 @@ from layers.PatchTST_layers import *
 from layers.RevIN import RevIN
 
 # Cell
-class PatchTST_backbone(nn.Module):
+class PatchTST_backbone_weighted_avg(nn.Module):
     def __init__(self, 
                  c_in:int, 
                  context_window:int, 
@@ -73,6 +71,10 @@ class PatchTST_backbone(nn.Module):
         if padding_patch == 'end':  # can be modified to general case
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride)) 
             patch_num += 1
+            
+        # 生成权重矩阵/掩码矩阵
+        # 这个做法是权重在embedding之前就显式地插入权重值了
+        self.weight_mask = WeightMask(patch_num*patch_len, patch_len)
         
         # Backbone
         # 核心的Encoder框架
@@ -86,6 +88,7 @@ class PatchTST_backbone(nn.Module):
         # Head
         # 也即最后一个"展平 & 线性层"
         # 其将(d_model, patch_num)的输入战平后并映射至(1, pred_len)的输出
+        self.d_model = d_model
         self.head_nf = d_model * patch_num  # d_model和patch总数的乘积，为encoder的输出
         self.n_vars = c_in  # n_vars就设置为channel数
         self.pretrain_head = pretrain_head  # 默认为False
@@ -95,13 +98,16 @@ class PatchTST_backbone(nn.Module):
         if self.pretrain_head:
             # 如果要预训练的话，那么改用一个一维卷积的预测头
             self.head = self.create_pretrain_head(self.head_nf, c_in, fc_dropout)  # custom head passed as a partial func with all its kwargs
-        elif head_type == 'flatten':
-            # 如果不预训练线性层的话，那么调用Flatten_Head
-            # 它会完成：展平 + 线性映射 + dropout （不过这里的dropout默认设置为0）
-            self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
-        
+        # elif head_type == 'flatten':
+        #     # 如果不预训练线性层的话，那么调用Flatten_Head
+        #     # 它会完成：展平 + 线性映射 + dropout （不过这里的dropout默认设置为0）
+        #     self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
+        elif head_type == 'average':
+            pass
+        else:
+            self.head = Average_Head(self.individual, self.n_vars, self.d_model, target_window, head_dropout=head_dropout)
+            
     
-    @profile
     def forward(self, z):                                                   # z: [bs x nvars x seq_len]
         # norm
         # 1、先做RevIN归一化
@@ -118,6 +124,10 @@ class PatchTST_backbone(nn.Module):
         # 参数为（dim,size,step）：dim表明想要切分的维度，size表明切分块（滑动窗口）的大小，step表明切分的步长
         # 这里用于从一个分批输入的张量中提取滑动的局部块
         z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)   # z: [bs x nvars x patch_num x patch_len]
+        
+        # 这个做法是权重在embedding之前就显式地插入权重值了？
+        z = self.weight_mask(z)                                             # z: [bs x nvars x patch_num x patch_len]
+        
         z = z.permute(0,1,3,2)                                              # z: [bs x nvars x patch_len x patch_num]
         
         # model
@@ -141,6 +151,122 @@ class PatchTST_backbone(nn.Module):
                     nn.Conv1d(in_channels=head_nf, out_channels=vars, kernel_size=1)
                 )
 
+# 计算权重掩码矩阵
+class WeightMask(nn.Module):
+    def __init__(self, data_len, segment_len=None, acf_lst=None) -> None:
+        super().__init__()
+        
+        self.segment_len = segment_len
+        
+        # # 因为acf_lst是univariate的，所以需要修改其和channel数一样多
+        # if acf_lst is None:
+        #     self.acf_lst = acf_lst
+        # else:
+        #     if self.segment_len is not None:
+        #         self.acf_lst = []
+        #         for item in acf_lst:
+        #             tmp_lst = [item]*self.segment_len
+        #             self.acf_lst.extend(tmp_lst)
+        #         # 最后别忘记将list转成tensor
+        #         self.acf_lst = torch.tensor(self.acf_lst)
+        #         self.acf_lst = self.acf_lst.float()  # 转成float的dtype
+        #     else:
+        #         raise Exception("the combiation of segment_len and acf_lst is illegal!")
+        
+        if segment_len is None:
+            self.triu = torch.triu(torch.ones(data_len, data_len), diagonal=0)
+        else:
+            self.triu = torch.zeros(data_len, data_len)
+            for i in range(data_len):
+                for j in range(data_len):
+                    import math
+                    # 在判断条件时应该按照[1, data_len]的范围来判断，而非[0, data_len-1]来
+                    if (i+1) <= segment_len * math.ceil((j+1) / segment_len):
+                        self.triu[i][j] = 1
+        
+        self.mask_weight = nn.Linear(data_len, data_len)
+        
+        # * 由于输入的x为[bs x nvars x patch_num x patch_len]，
+        # * 所以我们应当是沿着dim=-1的patch_num的维度做softmax的！！！
+        self.softmax = nn.Softmax(dim=-1)
+    
+    def forward(self, x):
+        # x: [bs x nvars x patch_num x patch_len]
+        # 由于我们需要对各个patch_num做掩码矩阵，也即给不同的patch_num以不同的权重值
+        # 但又由于我们不希望不同patch_len会有不相同的权重，所以这里要将后两维展平，并做分段的mask
+        
+        bs, nvars, patch_num, patch_len = x.shape
+        
+        x = x.reshape(bs, nvars, -1)  # x: [bs x nvars x (patch_num*patch_len)]
+        
+        # 将上三角函数移到device上
+        self.triu = self.triu.to(x.device)  # triu: [bs x nvars x (patch_num*patch_len)]d
+        
+        # 1.计算x和Linear的乘积，得到门控值
+        gate = self.mask_weight(x)  # gate: [bs x nvars x (patch_num*patch_len)]
+        
+        # # 1.5 如果还有acf_lst，那么这个时候需要提前先乘上acf_lst
+        # # 相当于对每个seq_len的位置引入了先验知识
+        # if self.acf_lst is not None:
+        #     self.acf_lst = self.acf_lst.to(x.device)  # 先切换到同一个device
+        #     cur_seq_len = x.shape[1]  # 取出需要的哪一个部分的seq_len
+        #     gate = gate * self.acf_lst[-cur_seq_len:]  # 这里是逐元素乘法
+        
+        # 2.门控值需要先过softmax做归一化
+        # !!! 一定不要忘记softmax！！！
+        # ! 之前就是这里没有归一到[0, 1]之间，导致后面做exp运算时超出数字边界，得到inf值了！！！
+        gate = self.softmax(gate)  # gate: [bs x nvars x (patch_num*patch_len)]
+        
+        # print(x.dtype)
+        # print(gate.dtype)
+        # print(self.acf_lst.dtype)
+        # print(self.triu.dtype)
+        
+        # 3.和上三角矩阵L_n做矩阵乘法
+        mask = torch.matmul(gate, self.triu)  # mask: [bs x nvars x (patch_num*patch_len)]
+        
+        # 打印gate和mask等的相关的信息
+        torch.set_printoptions(profile="full")
+        # print(f"self.triu: {self.triu}")
+        # torch.set_printoptions(profile="default") # reset
+        # print(f"gate in WeightMask: {gate}")
+        mask_for_print = mask[:, :, ::self.segment_len]  # 由于多个channel共享相同的权重值，所以间隔着只取出第一个就ok了
+        mask_for_print = mask_for_print.mean(dim=0)  # 对当前batch的所有样本取平均值？
+        print(f"mask_for_print in WeightMask: {mask_for_print}")
+        # print(mask.shape)
+        torch.set_printoptions(profile="default") # reset
+        
+        # 4.最后将得到的mask和原来的x做逐元素乘法，得到最终结果
+        # * 简单来说就是给输入中的每个元素以不同的权重
+        x = torch.mul(mask, x)  # x: [bs x nvars x (patch_num*patch_len)]
+        
+        # 5.重新reshape回来
+        x = x.reshape(bs, nvars, patch_num, patch_len)  # x: [bs x nvars x patch_num x patch_len]
+        
+        return x
+
+# 对多个patch做average
+class Average_Head(nn.Module):
+    def __init__(self, individual, n_vars, d_model, target_window, head_dropout=0):
+        super().__init__()
+        
+        # 最后一个"平均 & 线性层"
+        # 其将(d_model, patch_num)的输入先沿着patch_num做平均，
+        # 平均完成后映射至(pred_len)的输出
+        
+        self.individual = individual
+        self.n_vars = n_vars
+
+        # 将d_model和patch_num维展平，并做线性映射到1*pred_len维
+        self.linear = nn.Linear(d_model, target_window)
+        self.dropout = nn.Dropout(head_dropout)
+            
+    def forward(self, x):       # x: [bs x nvars x d_model x patch_num]
+        # 先沿着patch_num做平均、再线性映射，还外加一个dropout（不过默认为0）
+        x = torch.mean(x, dim=-1)  # 沿着patch_num做平均，完成后维度为[bs x nvars x d_model]
+        x = self.linear(x)  # 线性变换后，维度为[bs x nvars x pred_len]
+        x = self.dropout(x)
+        return x
 
 class Flatten_Head(nn.Module):
     def __init__(self, individual, n_vars, nf, target_window, head_dropout=0):
@@ -220,8 +346,7 @@ class TSTiEncoder(nn.Module):  # "i" means channel-independent
         self.encoder = TSTEncoder(q_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
                                    pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers, store_attn=store_attn)
 
-    
-    @profile 
+        
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
         
         n_vars = x.shape[1]
@@ -262,7 +387,6 @@ class TSTEncoder(nn.Module):
                                                       pre_norm=pre_norm, store_attn=store_attn) for i in range(n_layers)])
         self.res_attention = res_attention
 
-    @profile
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
         output = src
         scores = None
@@ -325,7 +449,6 @@ class TSTEncoderLayer(nn.Module):
 
 
     # @get_local('attn')
-    @profile
     def forward(self, src:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None) -> Tensor:
 
         # Multi-Head attention sublayer
@@ -397,7 +520,6 @@ class _MultiheadAttention(nn.Module):
         self.to_out = nn.Sequential(nn.Linear(n_heads * d_v, d_model), nn.Dropout(proj_dropout))
 
 
-    @profile
     def forward(self, Q:Tensor, K:Optional[Tensor]=None, V:Optional[Tensor]=None, prev:Optional[Tensor]=None,
                 key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
 
@@ -444,7 +566,6 @@ class _ScaledDotProductAttention(nn.Module):
         self.scale = nn.Parameter(torch.tensor(head_dim ** -0.5), requires_grad=lsa)
         self.lsa = lsa
 
-    @profile
     def forward(self, q:Tensor, k:Tensor, v:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
         '''
         Input shape:

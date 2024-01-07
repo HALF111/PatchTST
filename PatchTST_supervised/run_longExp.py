@@ -4,6 +4,7 @@ import torch
 from exp.exp_main import Exp_Main
 import random
 import numpy as np
+import matplotlib.pyplot as plt
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Autoformer & Transformer family for Time Series Forecasting')
@@ -84,7 +85,9 @@ if __name__ == '__main__':
     parser.add_argument('--do_predict', action='store_true', help='whether to predict unseen future data')
 
     # optimization
-    parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
+    # parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
+    # 这里是否默认设置为0会更好？因为加载数据并不是瓶颈，多线程反倒可能由于别人在跑程序导占用较多的cpu而导致变慢
+    parser.add_argument('--num_workers', type=int, default=0, help='data loader num workers')
     parser.add_argument('--itr', type=int, default=1, help='experiments times')
     parser.add_argument('--train_epochs', type=int, default=100, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size of train input data')
@@ -97,6 +100,13 @@ if __name__ == '__main__':
     parser.add_argument('--pct_start', type=float, default=0.3, help='pct_start')
     # 使用混合精度进行训练
     parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
+    
+    # L2正则
+    parser.add_argument('--add_l2', action='store_true')
+    parser.add_argument('--l2_alpha', type=float, default=1e-4)
+    
+    # 在预测头中额外引入的d_pred参数（optional）
+    parser.add_argument('--d_pred', type=int, default=512, help='intermediate layer dimension in the prediction head')
 
     # GPU
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
@@ -104,6 +114,10 @@ if __name__ == '__main__':
     parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
     parser.add_argument('--devices', type=str, default='0,1,2,3', help='device ids of multile gpus')
     parser.add_argument('--test_flop', action='store_true', default=False, help='See utils/tools for usage')
+    
+    parser.add_argument('--run_train', action='store_true')
+    parser.add_argument('--run_test', action='store_true')
+    parser.add_argument('--get_attn_plot', action='store_true')
 
     args = parser.parse_args()
 
@@ -149,11 +163,99 @@ if __name__ == '__main__':
                 args.des,ii)
 
             exp = Exp(args)  # set experiments
-            print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
-            exp.train(setting)
+            
+            if args.run_train:
+                print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
+                exp.train(setting)
 
-            print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-            exp.test(setting)
+            if args.run_test:
+                print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+                exp.test(setting, test=1)
+                
+            if args.get_attn_plot:
+                print('>>>>>>>get attn_plot : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+                
+                # assert args.batch_size == 1
+                
+                # def grid_show(to_shows, cols):
+                #     rows = (len(to_shows)-1) // cols + 1
+                #     it = iter(to_shows)
+                #     fig, axs = plt.subplots(rows, cols, figsize=(rows*8.5, cols*2))
+                #     for i in range(rows):
+                #         for j in range(cols):
+                #             try:
+                #                 image, title = next(it)
+                #             except StopIteration:
+                #                 image = np.zeros_like(to_shows[0][0])
+                #                 title = 'pad'
+                #             axs[i, j].imshow(image)
+                #             axs[i, j].set_title(title)
+                #             axs[i, j].set_yticks([])
+                #             axs[i, j].set_xticks([])
+                #     print("Saving figures in grid_show...")
+                #     folder = "./attn_weights"
+                #     plt.savefig(f"{folder}/{args.model_id}.pdf")
+                #     plt.show()
+
+                def visualize_head(att_map, name):
+                    plt.figure()
+                    ax = plt.gca()
+                    # Plot the heatmap
+                    im = ax.imshow(att_map)
+                    # Create colorbar
+                    cbar = ax.figure.colorbar(im, ax=ax)
+                    
+                    print("Saving figures in visualize_head...")
+                    folder = f"./attn_weights/{args.model_id}"
+                    if not os.path.exists(folder):
+                        os.makedirs(folder)
+                    plt.savefig(f"{folder}/{name}.pdf")
+                    plt.show()
+                    
+                # def visualize_heads(att_map, cols):
+                #     to_shows = []
+                #     att_map = att_map.squeeze()
+                #     for i in range(att_map.shape[0]):
+                #         to_shows.append((att_map[i], f'Head {i}'))
+                #     average_att_map = att_map.mean(axis=0)
+                #     to_shows.append((average_att_map, 'Head Average'))
+                #     grid_show(to_shows, cols=cols)
+
+                def gray2rgb(image):
+                    return np.repeat(image[...,np.newaxis],3,2)
+                
+                cache = exp.attn_plot(setting)
+                print(type(cache))
+                print(list(cache.keys()))
+                
+                # 事实上，假设batch_size为B，总数据量为(S/B)个batch，数据channel为C，注意力头数为A，
+                # 每个样本中token个数为N，以及encoder层数为L
+                # 那么结果为(S/B)*L个数组；
+                # 其中每个数组包含每个样本在每个层的注意力值，也即[C, A, N, N]
+                attention_maps = cache["TSTEncoderLayer.forward"]
+                
+                print(len(attention_maps))  # =(S/B)*L个
+                sample_num = len(attention_maps) // args.e_layers
+                
+                # a = 0
+                # for i in range(sample_num):
+                #     if i % 1000 == 0:
+                #         for l in range(args.e_layers):
+                #             # for a in range(args.n_heads):
+                #                 for c in range(args.enc_in):
+                #                     visualize_head(attention_maps[i*args.e_layers + l][c, a], f"s{i}_l{l}_head{a}_c{c}")
+                #                     # visualize_head(attention_maps[i*args.e_layers + l][c, 0], f"s{i}_l{l}_head{a}_c{c}")
+                
+                # 事实上，我们在这里可以做一些均值的操作
+                # stack后为[(S/B)*L*C, A, N, N]
+                attention_maps_stack = np.vstack(attention_maps)
+                print(attention_maps_stack.shape)
+                # 然后如果对全部avg的话那么只剩[N, N]了
+                attention_maps_avg = np.mean(attention_maps_stack, axis=(0,1))
+                print(attention_maps_avg.shape)
+                
+                visualize_head(attention_maps_avg, "avg_all")
+                
 
             if args.do_predict:
                 print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))

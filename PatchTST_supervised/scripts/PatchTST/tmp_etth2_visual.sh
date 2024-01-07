@@ -19,7 +19,7 @@ random_seed=2021
 # for seq_len in 336
 # for seq_len in 504 900 1080 1200 1360 1600
 # for seq_len in 1800 2000 2400
-for seq_len in 336
+for seq_len in 96 336 1080 1800 2400
 do
 # for pred_len in 96 192 336 720
 for pred_len in 96
@@ -47,8 +47,11 @@ do
       --stride 8\
       --des 'Exp' \
       --train_epochs 100\
-      --itr 1 --batch_size 128 --learning_rate 0.0001 \
-    #   --get_attn_plot
+      --itr 1 \
+      --batch_size 32 \
+      --learning_rate 0.0001 \
+      --gpu 1 \
+      --get_attn_plot
     #   > logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
 done
 done

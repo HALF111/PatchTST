@@ -472,3 +472,6 @@ $RECYCLE.BIN/
 /PatchTST_supervised/checkpoints
 /PatchTST_supervised/results
 /PatchTST_supervised/test_results
+
+*.pdf
+*.dat
