@@ -101,7 +101,7 @@ class PatchTST_backbone(nn.Module):
             self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
         
     
-    @profile
+    # @profile
     def forward(self, z):                                                   # z: [bs x nvars x seq_len]
         # norm
         # 1、先做RevIN归一化
@@ -221,7 +221,7 @@ class TSTiEncoder(nn.Module):  # "i" means channel-independent
                                    pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers, store_attn=store_attn)
 
     
-    @profile 
+    # @profile 
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
         
         n_vars = x.shape[1]
@@ -262,7 +262,7 @@ class TSTEncoder(nn.Module):
                                                       pre_norm=pre_norm, store_attn=store_attn) for i in range(n_layers)])
         self.res_attention = res_attention
 
-    @profile
+    # @profile
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
         output = src
         scores = None
@@ -325,7 +325,7 @@ class TSTEncoderLayer(nn.Module):
 
 
     # @get_local('attn')
-    @profile
+    # @profile
     def forward(self, src:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None) -> Tensor:
 
         # Multi-Head attention sublayer
@@ -397,7 +397,7 @@ class _MultiheadAttention(nn.Module):
         self.to_out = nn.Sequential(nn.Linear(n_heads * d_v, d_model), nn.Dropout(proj_dropout))
 
 
-    @profile
+    # @profile
     def forward(self, Q:Tensor, K:Optional[Tensor]=None, V:Optional[Tensor]=None, prev:Optional[Tensor]=None,
                 key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
 
@@ -444,7 +444,7 @@ class _ScaledDotProductAttention(nn.Module):
         self.scale = nn.Parameter(torch.tensor(head_dim ** -0.5), requires_grad=lsa)
         self.lsa = lsa
 
-    @profile
+    # @profile
     def forward(self, q:Tensor, k:Tensor, v:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
         '''
         Input shape:

@@ -130,7 +130,7 @@ class PatchTST_backbone_weighted_concat(nn.Module):
         z = self.backbone(z)                                                # z: [bs x nvars x d_model x patch_num]
         
         # 添加权重数据
-        z, mask_for_print = self.weight_mask(z)                                             # z: [bs x nvars x d_model x patch_num]
+        z, mask_for_print = self.weight_mask(z)                             # z: [bs x nvars x d_model x patch_num]
         
         print("weight_lst:")
         self.weight_lst = self.weight_lst.to(z.device)

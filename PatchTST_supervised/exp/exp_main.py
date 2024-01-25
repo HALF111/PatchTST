@@ -11,7 +11,8 @@ from models import PatchTST_multi_MoE, PatchTST_MoE, PatchTST_head_MoE, PatchTST
 from models import PatchTST_weighted_concat, PatchTST_weighted_pred_layer_avg
 from models import PatchTST_weighted_concat_no_constrain
 from models import PatchTST_pred_layer_avg
-from models import PatchTST_attn_weighted
+from models import PatchTST_attn_weighted, PatchTST_attn_weight_global, PatchTST_attn_weight_global_indiv
+from models import PatchTST_attn_weight_corr_dmodel_indiv
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 
@@ -35,6 +36,12 @@ class Exp_Main(Exp_Basic):
         super(Exp_Main, self).__init__(args)
 
     def _build_model(self):
+        # 需要在初始化的时候就调用函数生成ACF矩阵
+        if self.args.get_forecastability:
+            self.get_forecastability()
+        else:
+            self.acf_lst = self.args.acf_lst = None
+            
         model_dict = {
             'Autoformer': Autoformer,
             'Transformer': Transformer,
@@ -51,6 +58,9 @@ class Exp_Main(Exp_Basic):
             'PatchTST_weighted_concat_no_constrain': PatchTST_weighted_concat_no_constrain,
             'PatchTST_pred_layer_avg': PatchTST_pred_layer_avg,
             'PatchTST_attn_weighted': PatchTST_attn_weighted,
+            'PatchTST_attn_weight_global': PatchTST_attn_weight_global,
+            'PatchTST_attn_weight_global_indiv': PatchTST_attn_weight_global_indiv,
+            'PatchTST_attn_weight_corr_dmodel_indiv': PatchTST_attn_weight_corr_dmodel_indiv,
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -64,6 +74,24 @@ class Exp_Main(Exp_Basic):
 
     def _select_optimizer(self):
         model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        
+        # lr_multiple = 100
+        # # 将模型的参数分组
+        # params_main = []
+        # params_special = []
+        # for name, param in self.model.named_parameters():
+        #     if "w_s" in name:  # 这里假设特殊参数有特定的名字标识
+        #         params_special.append(param)
+        #         print("special:", name)
+        #     else:
+        #         params_main.append(param)
+        #         print("main:", name)
+        # model_optim = optim.Adam([{"params": params_main, 'lr': self.args.learning_rate},
+        #                           {"params": params_special, 'lr': lr_multiple * self.args.learning_rate}], 
+        #                         )
+        # print(model_optim)
+        # print("-----")
+        
         return model_optim
 
     def _select_criterion(self):
@@ -85,6 +113,173 @@ class Exp_Main(Exp_Basic):
         
     #     return cache
 
+
+    # def cal_acf_matrix(self, train_loader, vali_loader, test_loader):
+    #     loaders = [train_loader, vali_loader, test_loader]
+    #     data_x_lst, data_y_lst = [], []
+    #     for loader in loaders:
+    #         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(loader):
+    #             data_x_lst.append(batch_x.detach().cpu().numpy())
+    #             data_y_lst.append(batch_y.detach().cpu().numpy())
+        
+    #     data_x_lst = np.array(data_x_lst)
+    #     data_y_lst = np.array(data_y_lst)
+                
+    
+    # 这里forecastability相当于是提前就对全部输入数据计算好了的？
+    def get_forecastability(self):
+        import pandas as pd
+        import statsmodels as sm
+        from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+        from sklearn.preprocessing import StandardScaler
+        
+        dataset_file = os.path.join(self.args.root_path, self.args.data_path)
+
+        df_raw = pd.read_csv(dataset_file)
+        
+        seq_len = self.args.seq_len
+        pred_len = self.args.pred_len
+        if "ETTh" in self.args.data:
+            border1s = [0, 12 * 30 * 24 - seq_len, 12 * 30 * 24 + 4 * 30 * 24 - seq_len]
+            border2s = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
+        elif "ETTm" in self.args.data:
+            border1s = [0, 12 * 30 * 24 * 4 - seq_len, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4 - seq_len]
+            border2s = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
+        else:
+            num_train = int(len(df_raw) * 0.7)
+            num_test = int(len(df_raw) * 0.2)
+            num_vali = len(df_raw) - num_train - num_test
+            border1s = [0, num_train - seq_len, len(df_raw) - num_test - seq_len]
+            border2s = [num_train, num_train + num_vali, len(df_raw)]
+
+
+        cols_data = df_raw.columns[1:]
+        df_data = df_raw[cols_data]
+
+        scaler = StandardScaler()
+        train_data = df_data[border1s[0]:border2s[0]]
+        scaler.fit(train_data.values)
+        data = scaler.transform(df_data.values)
+        
+        print("data.shape:", data.shape)  # data: [sample_num, channel]
+
+        acf_lst = []
+        for channel in range(data.shape[1]):
+            cur_data = data[:, channel]
+            # * 由于我们需要的是seq_len和pred_len之间的ACF，所以最大的lag不会超过seq_len+pred_len
+            acf = sm.tsa.stattools.acf(cur_data, nlags=seq_len+pred_len)
+            # print(f"acf of channel {channel}: {acf}")
+            acf_lst.append(acf)
+        
+        acf_lst = np.array(acf_lst)
+        print("acf_lst.shape:", acf_lst.shape)  # acf_lst: [channel, seq_len+pred_len]
+        
+        # * 记录为self的成员变量中
+        self.acf_lst = acf_lst
+        self.args.acf_lst = acf_lst
+        
+        # return acf_abs[1:nlags+1]
+        return acf_lst  # acf_lst: [channel, seq_len+pred_len]
+    
+    def calc_corr_dmodel(self):
+        train_data, train_loader = self._get_data(flag='train')
+
+        mid_embedding_lst = []
+        batch_y_lst = []
+        
+        self.model.eval()
+        with torch.no_grad():
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+                batch_x = batch_x.float().to(self.device)
+                batch_y = batch_y.float()
+
+                batch_x_mark = batch_x_mark.float().to(self.device)
+                batch_y_mark = batch_y_mark.float().to(self.device)
+
+                # decoder input
+                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
+                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+                # encoder - decoder
+                if 'MoE' in self.args.model:
+                    outputs, aux_loss = self.model(batch_x)
+                elif 'Linear' in self.args.model or 'TST' in self.args.model:
+                    outputs, mid_embedding = self.model(batch_x, return_mid_embedding=True)
+                else:
+                    if self.args.output_attention:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                
+                f_dim = -1 if self.args.features == 'MS' else 0
+                
+                # outputs = outputs[:, -self.args.pred_len:, f_dim:]
+                # pred = outputs.detach().cpu()
+                
+                # batch_y原来的shape为[bs, pred_len, channel]
+                # * 为了和mid_embedding对齐，将其变成[bs, channel, pred_len]
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                batch_y = batch_y.detach().cpu()
+                batch_y = batch_y.permute(0, 2, 1)
+                
+                # * mid_emebedding的shape为[bs, channel, patch_num, d_model]
+                mid_embedding = mid_embedding.detach().cpu()
+
+                # append到数组上
+                batch_y_lst.append(batch_y)
+                mid_embedding_lst.append(mid_embedding)
+        
+        # 先stack、再reshape、最后变成numpy
+        # * 此时bs已经变成了sample_num了！！！
+        mid_embeddings = torch.stack(mid_embedding_lst)
+        batch_ys = torch.stack(batch_y_lst)
+        mid_embeddings = mid_embeddings.reshape(-1, mid_embeddings.shape[-3], mid_embeddings.shape[-2], mid_embeddings.shape[-1]).numpy()
+        batch_ys = batch_ys.reshape(-1, batch_ys.shape[-2], batch_ys.shape[-1]).numpy()
+        
+        # 2、计算correlation？
+        sample_num, channels, patch_num, d_model = mid_embeddings.shape
+        _, _, pred_len = batch_ys.shape
+        # 其shape为[channel, patch_num]
+        corr_dmodel = np.zeros((channels, patch_num))
+        
+        # 按照channel顺序和patch舒徐逐一计算correlation
+        for cur_channel in range(channels):
+            for cur_patch in range(patch_num):
+                # 优化原来的两重循环？
+                # * solution 2
+                x1 = mid_embeddings[:, cur_channel, cur_patch, :]  # [samples, d_model]
+                x2 = batch_ys[:, cur_channel, :]  # [samples, pred_len]
+                # 由于np.corrcoef算出来是2*2的矩阵，所以只需要从其中取出一个值就可以了
+                corr_matrix = np.corrcoef(x1, x2, rowvar=False)
+                # print(corr_matrix.shape)  # 得到的结果为[d_model+pred_len, d_model+pred_len]
+                # print(corr_matrix)
+                # 由于前半段为d_model，后半段为pred_len
+                # 那我们分别将其取出就ok了
+                cur_corr = np.mean(np.abs(corr_matrix[:d_model, d_model:]))
+                corr_dmodel[cur_channel, cur_patch] = cur_corr
+                
+                # * solution 1
+                # cur_corr_lst = []
+                # for cur_pred in range(pred_len):
+                #     for cur_d in range(d_model):
+                #         x1 = mid_embeddings[:, cur_channel, cur_patch, cur_d]
+                #         x2 = batch_ys[:, cur_channel, cur_pred]
+                #         # 由于np.corrcoef算出来是2*2的矩阵，所以只需要从其中取出一个值就可以了
+                #         corr = np.corrcoef(x1, x2)[0, 1]
+                #         cur_corr_lst.append(abs(corr))
+                # avg_corr = sum(cur_corr_lst) / len(cur_corr_lst)
+                # corr_dmodel[cur_channel, cur_patch] = avg_corr
+                # # 事实证明，二者确实是相等的
+                # print(cur_corr, avg_corr)
+        
+        # print(corr_dmodel.shape)
+        # print(corr_dmodel)
+        
+        
+        self.model.train()
+        
+        # [channel, patch_num]
+        return corr_dmodel
+        
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
@@ -138,8 +333,8 @@ class Exp_Main(Exp_Basic):
         self.model.train()
         return total_loss
 
-    @profile
-    def train(self, setting):
+    # @profile
+    def train(self, setting, acf_lst=None):
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
@@ -166,6 +361,7 @@ class Exp_Main(Exp_Basic):
             # 因此需要改成AdamW优化器，并设置weight_decay
             model_optim = optim.AdamW(self.model.parameters(), lr=self.args.learning_rate,
                                       weight_decay=self.args.l2_alpha)
+            print("change to AdamW optimizer")
 
             # # plan 2: 对部分参数施加L2正则：
             # params_all, params_need_L2 = [], []
@@ -197,12 +393,13 @@ class Exp_Main(Exp_Basic):
             time_forward = 0
             time_backward = 0
             
-            # 测试发现dataloader加载数据的时间会随着epoch增加变得越来越长
-            time_0 = time.time()
-            for _, (_, _, _, _) in enumerate(train_loader):
-                a = 0
-                a += 1
-            print("enumerating time:", time.time() - time_0)
+            # # 测试发现dataloader加载数据的时间会随着epoch增加变得越来越长
+            # # ! 后来发现是用visualizer做注意的可视化时存储下来的内容导致的内存泄露
+            # time_0 = time.time()
+            # for _, (_, _, _, _) in enumerate(train_loader):
+            #     a = 0
+            #     a += 1
+            # print("enumerating time:", time.time() - time_0)
 
             self.model.train()
             epoch_time = time.time()
@@ -298,6 +495,46 @@ class Exp_Main(Exp_Basic):
                     loss.backward()
                     model_optim.step()
                     
+                    # 如果是PatchTST_attn_weight_global
+                    # 首先从子模块中取出掩码矩阵对应的可学习参数w_s
+                    # 其维度为[1, patch_num]
+                    if self.args.model == "PatchTST_attn_weight_global":
+                        device = self._acquire_device()
+                        w_s = self.model.model.backbone.encoder.w_s.to(device)
+                        print(w_s.grad.shape)
+                        print(w_s.grad)
+                    elif self.args.model == "PatchTST_attn_weight_global_indiv" or self.args.model == "PatchTST_attn_weight_corr_dmodel_indiv":
+                        device = self._acquire_device()
+                        channel_num = -1
+                                                
+                        v_l = self.model.model.backbone.encoder.v_l.to(device)
+                        L_n = self.model.model.backbone.encoder.L_n.to(device)
+                        new_acf_lst = self.model.model.new_acf_lst.float().to(device)
+                        w_s_lst = self.model.model.backbone.encoder.w_s_lst.to(device)
+                        # (2)然后对权重矩阵乘上forecastability先验
+                        w_s_weights = [w_s.weight.clone() for w_s in w_s_lst]
+                        w_s_weights = [torch.mul(w_s, new_acf_lst[idx, :]) for idx, w_s in enumerate(w_s_weights)]
+                        # (2).2同时计算梯度
+                        w_s_grads = [w_s.weight.grad for w_s in w_s_lst]
+                        # (3)然后将乘上forecastability先验后的中间向量乘上来
+                        # ! 别忘记这里需要对self.w_s做softmax！！！
+                        import torch.nn.functional as F
+                        mask_global = [torch.mm(v_l, F.softmax(w_s)) for w_s in w_s_weights]  # mask_global: nvars个[patch_num, patch_num]
+                        print("1.w_s_weights[-1]:", w_s_weights[-1])
+                        print("2.F.softmax(w_s_weights[-1]):", F.softmax(w_s_weights[-1]))
+                        print("3.torch.mm(v_l, F.softmax(w_s_weights[-1])):", torch.mm(v_l, F.softmax(w_s_weights[-1])))
+                        print("mask_global_1[-1, 0, :]:", mask_global[channel_num][0, :])
+                        mask_global = [torch.mm(tmp_mask, L_n) for tmp_mask in mask_global]  # mask_global: nvars个[patch_num, patch_num] or nvars个[max_q_len, q_len]
+                        mask_global = torch.stack(mask_global)  # 默认为float, shape为[nvars x patch_num x patch_num]
+                        print("new_acf_lst[-1]:", new_acf_lst[channel_num])
+                        print("mask_global[-1, 0, :]:", mask_global[channel_num, 0, :])
+                        # (4) 打印梯度
+                        # print(len(w_s_lst))
+                        print(w_s_grads[0].shape)
+                        print("w_s_weights[-1]:", w_s_weights[channel_num])
+                        print("w_s_grads[-1]:", w_s_grads[channel_num])
+                        
+                    
                 if self.args.lradj == 'TST':
                     adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=False)
                     scheduler.step()
@@ -332,6 +569,17 @@ class Exp_Main(Exp_Basic):
                 adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args)
             else:
                 print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
+                
+            # ! 这个函数应当是在每个epoch结束时就需要调用一次
+            if self.args.model == "PatchTST_attn_weight_corr_dmodel_indiv":
+                # 其shape为[channel, patch_num]
+                corr_dmodel = self.calc_corr_dmodel()
+                corr_dmodel = torch.Tensor(corr_dmodel).float()
+                if epoch % 10 == 0:
+                    print(corr_dmodel.shape)
+                    print(corr_dmodel)
+                # 直接更新到new_acf_lst上
+                self.model.model.new_acf_lst = corr_dmodel
 
         # 这里为了防止异常，需要做一些修改，要在torch.load后加上map_location='cuda:0'
         best_model_path = path + '/' + 'checkpoint.pth'
@@ -348,6 +596,40 @@ class Exp_Main(Exp_Basic):
             print('loading model')
             # self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
             self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth'), map_location='cuda:0'))
+
+        # 如果是PatchTST_attn_weight_global
+        # 首先从子模块中取出掩码矩阵对应的可学习参数w_s
+        # 其维度为[1, patch_num]
+        if self.args.model == "PatchTST_attn_weight_global":
+            # print(self.model)
+            device = self._acquire_device()
+            v_l = self.model.model.backbone.encoder.v_l.to(device)
+            w_s = self.model.model.backbone.encoder.w_s.to(device)
+            L_n = self.model.model.backbone.encoder.L_n.to(device)
+            # ! 别忘记这里需要对self.w_s做softmax！！！
+            import torch.nn.functional as F
+            mask_global = torch.mm(v_l, F.softmax(w_s.weight))
+            mask_global = torch.mm(mask_global, L_n)  # mask: [patch_num, patch_num] or [max_q_len, q_len]
+            print(mask_global[0])
+        elif self.args.model == "PatchTST_attn_weight_global_indiv" or self.args.model == "PatchTST_attn_weight_corr_dmodel_indiv":
+            device = self._acquire_device()
+            v_l = self.model.model.backbone.encoder.v_l.to(device)
+            w_s_lst = self.model.model.backbone.encoder.w_s_lst.to(device)
+            L_n = self.model.model.backbone.encoder.L_n.to(device)
+            new_acf_lst = self.model.model.new_acf_lst.float().to(device)
+            # (2)然后对权重矩阵乘上forecastability先验
+            w_s_weights = [w_s.weight.clone() for w_s in w_s_lst]
+            w_s_weights = [torch.mul(w_s, new_acf_lst[idx, :]) for idx, w_s in enumerate(w_s_weights)]
+            # (3)然后将乘上forecastability先验后的中间向量乘上来
+            # ! 别忘记这里需要对self.w_s做softmax！！！
+            import torch.nn.functional as F
+            mask_global = [torch.mm(v_l, F.softmax(w_s)) for w_s in w_s_weights]  # mask_global: nvars个[patch_num, patch_num]
+            mask_global = [torch.mm(tmp_mask, L_n) for tmp_mask in mask_global]  # mask_global: nvars个[patch_num, patch_num] or nvars个[max_q_len, q_len]
+            mask_global = torch.stack(mask_global)  # 默认为float, shape为[nvars x patch_num x patch_num]
+            # print("new_acf_lst:", new_acf_lst)
+            # print("mask_global[:, 0, :]:", mask_global[:, 0, :])
+            
+
 
         preds = []
         trues = []

@@ -46,6 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--head_dropout', type=float, default=0.0, help='head dropout')
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
     parser.add_argument('--stride', type=int, default=8, help='stride')
+    # 默认是需要做padding的！
     parser.add_argument('--padding_patch', default='end', help='None: None; end: padding on the end')
     # 默认是做RevIN的！！但RevIN的affine参数并不学习
     parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
@@ -118,6 +119,9 @@ if __name__ == '__main__':
     parser.add_argument('--run_train', action='store_true')
     parser.add_argument('--run_test', action='store_true')
     parser.add_argument('--get_attn_plot', action='store_true')
+    
+    # 获得ACF-forecastability矩阵
+    parser.add_argument('--get_forecastability', action="store_true")
 
     args = parser.parse_args()
 
@@ -144,7 +148,24 @@ if __name__ == '__main__':
     if args.is_training:
         for ii in range(args.itr):
             # setting record of experiments
-            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
+            # setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
+            #     args.model_id,
+            #     args.model,
+            #     args.data,
+            #     args.features,
+            #     args.seq_len,
+            #     args.label_len,
+            #     args.pred_len,
+            #     args.d_model,
+            #     args.n_heads,
+            #     args.e_layers,
+            #     args.d_layers,
+            #     args.d_ff,
+            #     args.factor,
+            #     args.embed,
+            #     args.distil,
+            #     args.des,ii)
+            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_fore{}_{}_{}'.format(
                 args.model_id,
                 args.model,
                 args.data,
@@ -160,9 +181,15 @@ if __name__ == '__main__':
                 args.factor,
                 args.embed,
                 args.distil,
-                args.des,ii)
+                args.get_forecastability,
+                args.des,
+                ii)
 
             exp = Exp(args)  # set experiments
+            
+            # if args.get_forecastability:
+            #     print('>>>>>>>get_forecastability : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting)) 
+            #     exp.get_forecastability(setting)
             
             if args.run_train:
                 print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
@@ -171,7 +198,7 @@ if __name__ == '__main__':
             if args.run_test:
                 print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
                 exp.test(setting, test=1)
-                
+            
             if args.get_attn_plot:
                 print('>>>>>>>get attn_plot : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
                 
