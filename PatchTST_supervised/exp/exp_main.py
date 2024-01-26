@@ -13,6 +13,7 @@ from models import PatchTST_weighted_concat_no_constrain
 from models import PatchTST_pred_layer_avg
 from models import PatchTST_attn_weighted, PatchTST_attn_weight_global, PatchTST_attn_weight_global_indiv
 from models import PatchTST_attn_weight_corr_dmodel_indiv
+from models import PatchTST_random_mask
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 
@@ -34,6 +35,21 @@ warnings.filterwarnings('ignore')
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
+        
+        # 记录对于每个数据集，其最优的patch大概是多少？
+        data_path = self.args.data_path
+        if "illness" in data_path:
+            best_seq_len = [60, 80, 104]
+        elif "ETTh1" in data_path:
+            best_seq_len = [504, 1080, 1360, 1600]
+        elif "ETTm2" in data_path:
+            best_seq_len = [336, 720, 1200, 1360]
+        elif "weather" in data_path:
+            best_seq_len = [720, 900]
+        else:
+            best_seq_len = []
+        self.best_patch_num = [(seq_len-self.args.patch_len)//self.args.stride+2 for seq_len in best_seq_len]
+            
 
     def _build_model(self):
         # 需要在初始化的时候就调用函数生成ACF矩阵
@@ -61,6 +77,7 @@ class Exp_Main(Exp_Basic):
             'PatchTST_attn_weight_global': PatchTST_attn_weight_global,
             'PatchTST_attn_weight_global_indiv': PatchTST_attn_weight_global_indiv,
             'PatchTST_attn_weight_corr_dmodel_indiv': PatchTST_attn_weight_corr_dmodel_indiv,
+            'PatchTST_random_mask': PatchTST_random_mask
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -284,6 +301,14 @@ class Exp_Main(Exp_Basic):
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         self.model.eval()
+        
+        # 获得的总patch数
+        patch_num = int((self.args.seq_len - self.args.patch_len) / self.args.stride + 1)
+        # 默认是需要做padding的？
+        # padding大小事实上只是一个stride的大小！
+        if self.args.padding_patch == 'end': # can be modified to general case
+            patch_num += 1
+            
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
@@ -308,7 +333,16 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'MoE' in self.args.model:
+                    if 'random' in self.args.model:
+                        import random
+                        # validate的时候直接保留全部patches
+                        # random_len = 0
+                        # idx = random.randint(0, len(self.best_patch_num)-1)
+                        unmasked_patch_num = self.best_patch_num[-1]
+                        random_len = patch_num - unmasked_patch_num
+                        
+                        outputs = self.model(batch_x, random_len)
+                    elif 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
                     elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
@@ -384,6 +418,13 @@ class Exp_Main(Exp_Basic):
                                             pct_start = self.args.pct_start,
                                             epochs = self.args.train_epochs,
                                             max_lr = self.args.learning_rate)
+        
+        # 获得的总Patch数
+        patch_num = int((self.args.seq_len - self.args.patch_len) / self.args.stride + 1)
+        # 默认是需要做padding的？
+        # padding大小事实上只是一个stride的大小！
+        if self.args.padding_patch == 'end': # can be modified to general case
+            patch_num += 1
 
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -439,7 +480,20 @@ class Exp_Main(Exp_Basic):
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
-                    if 'MoE' in self.args.model:
+                    if 'random' in self.args.model:
+                        import random
+                        # 至少保留一个patch？
+                        # 又由于最后一个patch一般是padding出来的，所以还是希望至少保留2个patch会更好。
+                        # random_len = random.randint(0, patch_num-2)
+                        
+                        # random_len = patch_num - 42  # 改为固定只使用最后的42个patch的数据，看看会变好吗
+                        
+                        idx = random.randint(0, len(self.best_patch_num)-1)
+                        unmasked_patch_num = self.best_patch_num[idx]
+                        random_len = patch_num - unmasked_patch_num
+                        
+                        outputs = self.model(batch_x, random_len)
+                    elif 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
                     elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
@@ -656,6 +710,13 @@ class Exp_Main(Exp_Basic):
         #     print(f"mask_for_print in WeightMask: {mask_for_print}")
         #     # print(mask.shape)
         #     torch.set_printoptions(profile="default") # reset
+        
+        # 获得的总patch数
+        patch_num = int((self.args.seq_len - self.args.patch_len) / self.args.stride + 1)
+        # 默认是需要做padding的？
+        # padding大小事实上只是一个stride的大小！
+        if self.args.padding_patch == 'end': # can be modified to general case
+            patch_num += 1
 
         self.model.eval()
         with torch.no_grad():
@@ -682,7 +743,16 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'MoE' in self.args.model:
+                    if 'random' in self.args.model:
+                        import random
+                        # test的时候也是直接保留全部patches
+                        # random_len = 0
+                        # idx = random.randint(0, len(self.best_patch_num)-1)
+                        unmasked_patch_num = self.best_patch_num[-1]
+                        random_len = patch_num - unmasked_patch_num
+                        
+                        outputs = self.model(batch_x, random_len)
+                    elif 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
                     elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)

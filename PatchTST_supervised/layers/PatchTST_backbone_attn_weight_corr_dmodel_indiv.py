@@ -135,7 +135,9 @@ class PatchTST_backbone_attn_weight_corr_dmodel_indiv(nn.Module):
             z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
         else:
             z, mid_embedding = self.backbone(z, return_mid_embedding)
-            
+        
+        # * 这一步的目的：是在经过预测层的线性映射之前，在隐藏层向量上先乘以mask向量
+        # * 然后乘完之后才经过预测层。
         # (1)首先从子模块中取出掩码矩阵对应的可学习参数w_s
         # 其维度为[1, patch_num]
         v_l = self.backbone.encoder.v_l
@@ -156,6 +158,7 @@ class PatchTST_backbone_attn_weight_corr_dmodel_indiv(nn.Module):
         # 然后就可以添加mask权重数据，这里只需要乘上mask_global[0]就可以了
         z = torch.mul(z, mask_global[:, 0:1, :])                                           # z: [bs x nvars x d_model x patch_num]
         
+        # * 最后再经过预测层
         z = self.head(z)                                                                    # z: [bs x nvars x target_window] 
         
         # denorm

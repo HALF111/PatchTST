@@ -18,9 +18,10 @@ class RevIN(nn.Module):
         if self.affine:
             self._init_params()
 
-    def forward(self, x, mode:str):
+    # 修改成只对最后的norm_len部分计算norm时的mean和var信息
+    def forward(self, x, mode:str, norm_len=None):
         if mode == 'norm':
-            self._get_statistics(x)
+            self._get_statistics(x, norm_len)
             x = self._normalize(x)
         elif mode == 'denorm':
             x = self._denormalize(x)
@@ -32,8 +33,12 @@ class RevIN(nn.Module):
         self.affine_weight = nn.Parameter(torch.ones(self.num_features))
         self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
 
-    def _get_statistics(self, x):
+    def _get_statistics(self, x, norm_len=None):
         dim2reduce = tuple(range(1, x.ndim-1))
+        if norm_len is not None:
+            x = x[:, -norm_len:, :]  # 此时x的shape为[bs, seq_len, channel]
+            # print("norm_len:", norm_len)
+            
         if self.subtract_last:
             self.last = x[:,-1,:].unsqueeze(1)
         else:

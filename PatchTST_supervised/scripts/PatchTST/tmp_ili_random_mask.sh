@@ -8,11 +8,12 @@ fi
 seq_len=104
 # seq_len=36
 
-model_name=PatchTST
+# model_name=PatchTST
 # model_name=PatchTST_MoE
 # model_name=PatchTST_multi_MoE
 # model_name=PatchTST_head_MoE
 # model_name=PatchTST_avg
+model_name=PatchTST_random_mask
 
 root_path_name=./dataset/
 data_path_name=national_illness.csv
@@ -26,12 +27,11 @@ random_seed=2021
 # for seq_len in 60 80 104 144
 # for seq_len in 104
 # for seq_len in 120 168 192
-for seq_len in 336
-# for seq_len in 192
+# for seq_len in 60
+for seq_len in 192
 do
 for pred_len in 24
 do
-    # mprof run --python python run_longExp.py \
     python -u run_longExp.py \
       --random_seed $random_seed \
       --is_training 1 \
