@@ -26,10 +26,11 @@ class FullAttention(nn.Module):
 
         scores = torch.einsum("blhe,bshe->bhls", queries, keys)
 
-        if self.mask_flag:
-            if attn_mask is None:
+        if self.mask_flag:  # true表示需要mask，否则表示无需mask
+            if attn_mask is None:  # 如果需要mask却未提供的话，则自动生成一个上三角的mask
                 attn_mask = TriangularCausalMask(B, L, device=queries.device)
 
+            # mask中填充为负无穷，softmax时会变成0。
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
         A = self.dropout(torch.softmax(scale * scores, dim=-1))

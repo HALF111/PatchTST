@@ -18,7 +18,8 @@ gpu=3
 
 random_seed=2021
 # for seq_len in 96 192 336 504 720 900 1080 1200 1360 1600 1800 2000 2400
-for seq_len in 1600 1800 2000 2400
+# for seq_len in 1600 1800 2000 2400
+for seq_len in 336
 do
 # for pred_len in 96 192 336 720
 for pred_len in 96
@@ -49,6 +50,7 @@ do
       --patience 20\
       --gpu $gpu \
       --itr 1 --batch_size 128 --learning_rate 0.0001 \
-      >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
+      --run_train --run_test
+    #   >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
 done
 done

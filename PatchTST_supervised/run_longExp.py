@@ -2,6 +2,7 @@ import argparse
 import os
 import torch
 from exp.exp_main import Exp_Main
+from exp.exp_main_new_head import Exp_Main_new_head
 import random
 import numpy as np
 import matplotlib.pyplot as plt
@@ -102,6 +103,9 @@ if __name__ == '__main__':
     # 使用混合精度进行训练
     parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
     
+    # * 加入一个norm策略，用于判断batchnorm还是layernorm
+    parser.add_argument('--norm', type=str, default='batch', help='batch, layer')
+    
     # L2正则
     parser.add_argument('--add_l2', action='store_true')
     parser.add_argument('--l2_alpha', type=float, default=1e-4)
@@ -122,6 +126,9 @@ if __name__ == '__main__':
     
     # 获得ACF-forecastability矩阵
     parser.add_argument('--get_forecastability', action="store_true")
+    
+    # 增加针对当前数据集的最长的seq_len
+    parser.add_argument('--longest_seq_len', type=int, default=2000)
 
     args = parser.parse_args()
 
@@ -143,7 +150,9 @@ if __name__ == '__main__':
     print('Args in experiment:')
     print(args)
 
+    # 具体用哪个可以根据真实情况来修改
     Exp = Exp_Main
+    # Exp = Exp_Main_new_head
 
     if args.is_training:
         for ii in range(args.itr):

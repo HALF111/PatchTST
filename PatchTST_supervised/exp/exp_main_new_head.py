@@ -6,7 +6,6 @@
 
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-
 from models import Informer, Autoformer, Transformer, DLinear, Linear, NLinear, PatchTST
 from models import PatchTST_multi_MoE, PatchTST_MoE, PatchTST_head_MoE, PatchTST_weighted_avg
 from models import PatchTST_weighted_concat, PatchTST_weighted_pred_layer_avg
@@ -15,10 +14,6 @@ from models import PatchTST_pred_layer_avg
 from models import PatchTST_attn_weighted, PatchTST_attn_weight_global, PatchTST_attn_weight_global_indiv
 from models import PatchTST_attn_weight_corr_dmodel_indiv
 from models import PatchTST_random_mask
-from models import Masked_encoder
-from models import Transformer_patch, Transformer_patch_autoregressive
-from models import Decoder_autoregressive, Decoder_direct
-
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 
@@ -37,9 +32,9 @@ import numpy as np
 
 warnings.filterwarnings('ignore')
 
-class Exp_Main(Exp_Basic):
+class Exp_Main_new_head(Exp_Basic):
     def __init__(self, args):
-        super(Exp_Main, self).__init__(args)
+        super(Exp_Main_new_head, self).__init__(args)
         
         # 记录对于每个数据集，其最优的patch大概是多少？
         data_path = self.args.data_path
@@ -82,12 +77,7 @@ class Exp_Main(Exp_Basic):
             'PatchTST_attn_weight_global': PatchTST_attn_weight_global,
             'PatchTST_attn_weight_global_indiv': PatchTST_attn_weight_global_indiv,
             'PatchTST_attn_weight_corr_dmodel_indiv': PatchTST_attn_weight_corr_dmodel_indiv,
-            'PatchTST_random_mask': PatchTST_random_mask,
-            'Masked_encoder': Masked_encoder,
-            'Transformer_patch': Transformer_patch,
-            'Transformer_patch_autoregressive': Transformer_patch_autoregressive,
-            'Decoder_autoregressive': Decoder_autoregressive,
-            'Decoder_direct': Decoder_direct,
+            'PatchTST_random_mask': PatchTST_random_mask
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -100,7 +90,18 @@ class Exp_Main(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self):
-        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        # model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        
+        # 这里只对head部分做微调，所以optim也是一样的
+        params_head = []
+        for n_m, m in self.model.named_modules():
+            # print(n_m)
+            linear_layer_name = "head.linear"
+            embedding_name = "backbone.W_pos"
+            if linear_layer_name in n_m or embedding_name in n_m:
+                for n_p, p in m.named_parameters():
+                    params_head.append(p)
+        model_optim = optim.Adam(params_head, lr=self.args.learning_rate)
         
         # lr_multiple = 100
         # # 将模型的参数分组
@@ -123,35 +124,7 @@ class Exp_Main(Exp_Basic):
 
     def _select_criterion(self):
         criterion = nn.MSELoss()
-        return criterion
-
-    # def attn_plot(self, setting):
-    #     test_data, test_loader = self._get_data(flag='test')
-        
-    #     # 这里为了防止异常，需要做一些修改，要在torch.load后加上map_location='cuda:0'
-    #     print('loading model')
-    #     # self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
-    #     self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth'), map_location='cuda:0'))
-        
-    #     # 跑测试数据？
-    #     self.test(setting, test=1)
-        
-    #     cache = get_local.cache
-        
-    #     return cache
-
-
-    # def cal_acf_matrix(self, train_loader, vali_loader, test_loader):
-    #     loaders = [train_loader, vali_loader, test_loader]
-    #     data_x_lst, data_y_lst = [], []
-    #     for loader in loaders:
-    #         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(loader):
-    #             data_x_lst.append(batch_x.detach().cpu().numpy())
-    #             data_y_lst.append(batch_y.detach().cpu().numpy())
-        
-    #     data_x_lst = np.array(data_x_lst)
-    #     data_y_lst = np.array(data_y_lst)
-                
+        return criterion        
     
     # 这里forecastability相当于是提前就对全部输入数据计算好了的？
     def get_forecastability(self):
@@ -229,7 +202,7 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if 'MoE' in self.args.model:
                     outputs, aux_loss = self.model(batch_x)
-                elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                elif 'Linear' in self.args.model or 'TST' in self.args.model:
                     outputs, mid_embedding = self.model(batch_x, return_mid_embedding=True)
                 else:
                     if self.args.output_attention:
@@ -330,13 +303,12 @@ class Exp_Main(Exp_Basic):
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if 'MoE' in self.args.model:
                             outputs, aux_loss = self.model(batch_x)
-                        elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                        elif 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -344,71 +316,7 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'autoregressive' in self.args.model:
-                        if 'Transformer' in self.args.model:
-                            # start_symbol为x的最后一个patch
-                            start_symbol = batch_x[:, -self.args.patch_len:, ]
-                            output_patch_num = int((self.args.pred_len - self.args.patch_len) / self.args.stride + 1)
-                            assert output_patch_num * self.args.patch_len == self.args.pred_len
-                            
-                            # 先得到encoder的输出
-                            enc_out, enc_attns = self.model.encode(batch_x, batch_x_mark)
-                            
-                            ys = start_symbol
-                            # 然后自回归地生成后续输出
-                            for k in range(output_patch_num):
-                                ys_len = ys.shape[1]
-                                dec_out = self.model.decode(ys, batch_y_mark[:, :ys_len, :], enc_out, enc_attns)
-                                dec_out = dec_out[:, -self.args.patch_len:, :]
-                                ys = torch.cat([ys, dec_out], dim=1)
-                            
-                            # 但这里由于第一个是开始的token，所以不应该包括进来，所以这里还是保留后半部分的预测值。
-                            # 也即丢弃掉开头的start_symbol
-                            assert ys.shape[1] == self.args.pred_len + self.args.patch_len
-                            outputs = ys[:, -self.args.pred_len:, :]
-                            
-                        elif 'Decoder' in self.args.model:                            
-                            # 由于是decoder-only，所以start_symbol应当是整个batch_x了吧
-                            # start_symbol为x的最后一个patch
-                            start_symbol = batch_x
-                            output_patch_num = int((self.args.pred_len - self.args.patch_len) / self.args.stride + 1)
-                            assert output_patch_num * self.args.patch_len == self.args.pred_len
-                            
-                            ys = start_symbol  # 整个seq_len作为起始token。
-                            # 然后使用decoder自回归地生成后续输出
-                            for k in range(output_patch_num):
-                                ys_len = ys.shape[1]
-                                dec_out = self.model.inference(ys, batch_y_mark[:, :ys_len-self.args.seq_len, :])
-                                # 这里只需要再取出最后一个patch作为预测即可
-                                dec_out = dec_out[:, -self.args.patch_len:, :]
-                                # print("ys.shape", ys.shape)
-                                # print("dec_out.shape", dec_out.shape)
-                                ys = torch.cat([ys, dec_out], dim=1)
-                            
-                            # 最后，去掉开头的第一个start token（长为seq_len），即得到我们希望的预测结果
-                            # 也即保留靠后的pred_len部分。
-                            outputs = ys[:, -self.args.pred_len:, :]
-                            # print("ys.shape", ys.shape)
-                            # print("outputs.shape", outputs.shape)
-                    
-                    elif 'Decoder_direct' in self.args.model:
-                        # *和自回归类似，但由于是直接输出整个预测窗口，所以不应该不含ground-truth了
-                        # * 直接换成都是zero的值
-                        # 先去掉label_len
-                        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float().to(self.device)
-                        # 然后和batch_x合并？
-                        dec_inp = torch.cat([batch_x, dec_inp], dim=1).float().to(self.device)
-                        assert dec_inp.shape[1] == self.args.seq_len + self.args.pred_len
-                        
-                        # 这里的输入是整个seq_len+pred_len；
-                        # 由于decoder中本来就有causal的mask，所以这样整个输入是没问题的。
-                        
-                        # 模型给出输出
-                        # * 由于在Transformer里面就对输出做了只保留最后pred_len的裁剪，所以这里无需额外的处理了。
-                        # * 另外，由于是decoder，所以这里只需要输入dec_inp即可，不需要batch_x相关的内容
-                        outputs = self.model(dec_inp, batch_y_mark)
-                        
-                    elif 'random' in self.args.model:
+                    if 'random' in self.args.model:
                         import random
                         # validate的时候直接保留全部patches
                         # random_len = 0
@@ -419,14 +327,13 @@ class Exp_Main(Exp_Basic):
                         outputs = self.model(batch_x, random_len)
                     elif 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
-                    elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                    elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -435,7 +342,6 @@ class Exp_Main(Exp_Basic):
                 true = batch_y.detach().cpu()
 
                 loss = criterion(pred, true)
-                # print(loss.item())
 
                 # ! 注意：这里应当是loss.item()，而不是直接append上loss自身！
                 # ! 应为这样会直接将pytorch的计算图都给存储下来了！！！
@@ -453,6 +359,43 @@ class Exp_Main(Exp_Basic):
         path = os.path.join(self.args.checkpoints, setting)
         if not os.path.exists(path):
             os.makedirs(path)
+        
+        longest_model_id = self.args.model_id.replace(f"{self.args.seq_len}", f"{self.args.longest_seq_len}", 1)
+        longest_setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_fore{}_{}_{}'.format(
+                longest_model_id,
+                self.args.model,
+                self.args.data,
+                self.args.features,
+                self.args.longest_seq_len,
+                self.args.label_len,
+                self.args.pred_len,
+                self.args.d_model,
+                self.args.n_heads,
+                self.args.e_layers,
+                self.args.d_layers,
+                self.args.d_ff,
+                self.args.factor,
+                self.args.embed,
+                self.args.distil,
+                self.args.get_forecastability,
+                self.args.des,
+                0)
+        
+        # 先加载一下longest的模型
+        # 后面微调的时候只对head部分做微调！
+        longest_model_path = os.path.join(self.args.checkpoints, longest_setting)
+        longest_model_file = longest_model_path + '/' + 'checkpoint.pth'
+        
+        longest_model = torch.load(longest_model_file, map_location='cuda:0')
+        # print(self.model)
+        # 这里要删掉一些一些不匹配的参数，
+        # 在这里一个是线性预测层的参数，另一个是embedding层的参数
+        # del longest_model['model.backbone.W_P.weight']
+        # del longest_model['model.backbone.W_P.bias']
+        del longest_model['model.backbone.W_pos']
+        del longest_model['model.head.linear.weight']
+        del longest_model['model.head.linear.bias']
+        self.model.load_state_dict(longest_model, strict=False)
 
         time_now = time.time()
 
@@ -519,7 +462,25 @@ class Exp_Main(Exp_Basic):
             #     a += 1
             # print("enumerating time:", time.time() - time_0)
 
-            self.model.train()
+            # 这里微调的时候应该是train还是eval？
+            # self.model.train()
+            self.model.eval()
+            
+            # 这里只对head部分做微调，所以optim也是一样的
+            params_head = []
+            names_head = []
+            for n_m, m in self.model.named_modules():
+                # print(n_m)
+                linear_layer_name = "head.linear"
+                embedding_name = "backbone.W_pos"
+                if linear_layer_name in n_m or embedding_name in n_m:
+                    m.requires_grad_(True)
+                    for n_p, p in m.named_parameters():
+                        params_head.append(p)
+                        names_head.append(f"{n_m}.{n_p}")
+            model_optim = optim.Adam(params_head, lr=self.args.learning_rate)
+            
+            
             epoch_time = time.time()
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
                 time_before_get_data = time.time()
@@ -533,7 +494,6 @@ class Exp_Main(Exp_Basic):
 
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                # * 前一半为正常的label_len，后面填充为0。
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 
                 time_before_model = time.time()
@@ -544,7 +504,7 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'MoE' in self.args.model:
                             outputs, aux_loss = self.model(batch_x)
-                        elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                        elif 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -558,59 +518,7 @@ class Exp_Main(Exp_Basic):
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
-                    if 'autoregressive' in self.args.model:
-                        if 'Transformer' in self.args.model:
-                            # 加上input中的最后一个patch
-                            # 先去掉label_len
-                            # * 即回溯窗口的最后一个patch加上所有预测窗口的所有内容？
-                            dec_inp = batch_y[:, -self.args.pred_len:, :].float()
-                            dec_inp = torch.cat([batch_x[:, -self.args.patch_len:, ], dec_inp], dim=1).float().to(self.device)
-                            
-                            # # tril和triu的区别就是返回上半三角是1还是下半三角是1，l和u分别是lower和upper的意思
-                            # # https://blog.csdn.net/qq_38406029/article/details/122059507
-                            # dec_mask = torch.tril(torch.ones(dec_inp.size(1), dec_inp.size(1)), diagonal=0) == 0
-                            # dec_mask = dec_mask.to(self.device)
-                            
-                            # 看看怎么把mask传进来
-                            # * 好像在定义decoder模型时，只要设置了mask_flag=True，里面自己会加causal mask的。
-                            # outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, dec_self_mask=dec_mask)
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                            
-                            # # ! 由于在Transformer里面就对输出做了只保留最后pred_len的裁剪，所以这里不需要再去掉开头的那个bos的patch了。
-                            # outputs = outputs[:, 1:, :]
-                        elif 'Decoder' in self.args.model:
-                            # 先去掉label_len
-                            dec_inp = batch_y[:, -self.args.pred_len:, :].float()
-                            # 然后和batch_x合并？
-                            dec_inp = torch.cat([batch_x, dec_inp], dim=1).float().to(self.device)
-                            assert dec_inp.shape[1] == self.args.seq_len + self.args.pred_len
-                            
-                            # 这里的输入是整个seq_len+pred_len；
-                            # 由于decoder中本来就有causal的mask，所以这样整个输入是没问题的。
-                            
-                            # 模型给出输出
-                            # * 由于在Transformer里面就对输出做了只保留最后pred_len的裁剪，所以这里无需额外的处理了。
-                            # * 另外，由于是decoder，所以这里只需要输入dec_inp即可，不需要batch_x相关的内容
-                            outputs = self.model(dec_inp, batch_y_mark)
-                    
-                    elif 'Decoder_direct' in self.args.model:
-                        # *和自回归类似，但由于是直接输出整个预测窗口，所以不应该不含ground-truth了
-                        # * 直接换成都是zero的值
-                        # 先去掉label_len
-                        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                        # 然后和batch_x合并？
-                        dec_inp = torch.cat([batch_x, dec_inp], dim=1).float().to(self.device)
-                        assert dec_inp.shape[1] == self.args.seq_len + self.args.pred_len
-                        
-                        # 这里的输入是整个seq_len+pred_len；
-                        # 由于decoder中本来就有causal的mask，所以这样整个输入是没问题的。
-                        
-                        # 模型给出输出
-                        # * 由于在Transformer里面就对输出做了只保留最后pred_len的裁剪，所以这里无需额外的处理了。
-                        # * 另外，由于是decoder，所以这里只需要输入dec_inp即可，不需要batch_x相关的内容
-                        outputs = self.model(dec_inp, batch_y_mark)
-                        
-                    elif 'random' in self.args.model:
+                    if 'random' in self.args.model:
                         import random
                         # 至少保留一个patch？
                         # 又由于最后一个patch一般是padding出来的，所以还是希望至少保留2个patch会更好。
@@ -625,11 +533,12 @@ class Exp_Main(Exp_Basic):
                         outputs = self.model(batch_x, random_len)
                     elif 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
-                    elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                    elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
                     
@@ -716,12 +625,7 @@ class Exp_Main(Exp_Basic):
                         print(w_s_grads[0].shape)
                         print("w_s_weights[-1]:", w_s_weights[channel_num])
                         print("w_s_grads[-1]:", w_s_grads[channel_num])
-                    
-                    # # 如果是masked encoder的话，想看一下里面的mask参数学出来的是什么
-                    # if self.args.model == "Masked_encoder":
-                    #     mask_token = self.model.model.backbone.mask.weight
-                    #     print("mask_token.shape", mask_token.shape)
-                    #     print("mask_token", mask_token)
+                        
                     
                 if self.args.lradj == 'TST':
                     adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=False)
@@ -869,7 +773,7 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'MoE' in self.args.model:
                             outputs, aux_loss = self.model(batch_x)
-                        elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                        elif 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -877,67 +781,7 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'autoregressive' in self.args.model:
-                        if 'Transformer' in self.args.model:
-                            # start_symbol为x的最后一个patch
-                            start_symbol = batch_x[:, -self.args.patch_len:, ]
-                            output_patch_num = int((self.args.pred_len - self.args.patch_len) / self.args.stride + 1)
-                            assert output_patch_num * self.args.patch_len == self.args.pred_len
-                            
-                            # 先得到encoder的输出
-                            enc_out, enc_attns = self.model.encode(batch_x, batch_x_mark)
-                            
-                            ys = start_symbol
-                            # 然后自回归地生成后续输出
-                            for k in range(output_patch_num):
-                                ys_len = ys.shape[1]
-                                dec_out = self.model.decode(ys, batch_y_mark[:, :ys_len, :], enc_out, enc_attns)
-                                dec_out = dec_out[:, -self.args.patch_len:, :]
-                                ys = torch.cat([ys, dec_out], dim=1)
-                            
-                            # 但这里由于第一个是开始的token，所以不应该包括进来，所以这里还是保留后半部分的预测值。
-                            # 也即丢弃掉开头的start_symbol
-                            assert ys.shape[1] == self.args.pred_len + self.args.patch_len
-                            outputs = ys[:, -self.args.pred_len:, :]
-                        
-                        elif 'Decoder' in self.args.model:                            
-                            # 由于是decoder-only，所以start_symbol应当是整个batch_x了吧
-                            # start_symbol为x的最后一个patch
-                            start_symbol = batch_x
-                            output_patch_num = int((self.args.pred_len - self.args.patch_len) / self.args.stride + 1)
-                            assert output_patch_num * self.args.patch_len == self.args.pred_len
-                            
-                            ys = start_symbol
-                            # 然后使用decoder自回归地生成后续输出
-                            for k in range(output_patch_num):
-                                ys_len = ys.shape[1]
-                                dec_out = self.model.inference(ys, batch_y_mark[:, :ys_len, :])
-                                # 这里只需要再取出最后一个patch作为预测即可
-                                dec_out = dec_out[:, -self.args.patch_len:, :]
-                                ys = torch.cat([ys, dec_out], dim=1)
-                            
-                            # 最后，去掉开头的第一个start token，即得到我们希望的预测结果
-                            # 也即保留靠后的pred_len部分。
-                            outputs = ys[:, -self.args.pred_len:, :]
-                    
-                    elif 'Decoder_direct' in self.args.model:
-                        # *和自回归类似，但由于是直接输出整个预测窗口，所以不应该不含ground-truth了
-                        # * 直接换成都是zero的值
-                        # 先去掉label_len
-                        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float().to(self.device)
-                        # 然后和batch_x合并？
-                        dec_inp = torch.cat([batch_x, dec_inp], dim=1).float().to(self.device)
-                        assert dec_inp.shape[1] == self.args.seq_len + self.args.pred_len
-                        
-                        # 这里的输入是整个seq_len+pred_len；
-                        # 由于decoder中本来就有causal的mask，所以这样整个输入是没问题的。
-                        
-                        # 模型给出输出
-                        # * 由于在Transformer里面就对输出做了只保留最后pred_len的裁剪，所以这里无需额外的处理了。
-                        # * 另外，由于是decoder，所以这里只需要输入dec_inp即可，不需要batch_x相关的内容
-                        outputs = self.model(dec_inp, batch_y_mark)
-                    
-                    elif 'random' in self.args.model:
+                    if 'random' in self.args.model:
                         import random
                         # test的时候也是直接保留全部patches
                         # random_len = 0
@@ -948,7 +792,7 @@ class Exp_Main(Exp_Basic):
                         outputs = self.model(batch_x, random_len)
                     elif 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
-                    elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                    elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
@@ -970,8 +814,7 @@ class Exp_Main(Exp_Basic):
                 preds.append(pred)
                 trues.append(true)
                 inputx.append(batch_x.detach().cpu().numpy())
-                # if i % 20 == 0:
-                if i % 1 == 0:
+                if i % 20 == 0:
                     input = batch_x.detach().cpu().numpy()
                     gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
                     pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
@@ -1043,7 +886,7 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'MoE' in self.args.model:
                             outputs, aux_loss = self.model(batch_x)
-                        elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                        elif 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -1053,7 +896,7 @@ class Exp_Main(Exp_Basic):
                 else:
                     if 'MoE' in self.args.model:
                         outputs, aux_loss = self.model(batch_x)
-                    elif 'Linear' in self.args.model or 'TST' in self.args.model or 'Masked_encoder' in self.args.model:
+                    elif 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:

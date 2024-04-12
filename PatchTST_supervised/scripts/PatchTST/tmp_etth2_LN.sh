@@ -48,7 +48,8 @@ do
       --des 'Exp' \
       --train_epochs 100\
       --itr 1 --batch_size 128 --learning_rate 0.0001 \
-      --run_train --run_test
+      --run_train --run_test \
+      --norm layer
     #   --get_attn_plot
     #   > logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
 done

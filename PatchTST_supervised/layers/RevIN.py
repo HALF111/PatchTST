@@ -19,9 +19,10 @@ class RevIN(nn.Module):
             self._init_params()
 
     # 修改成只对最后的norm_len部分计算norm时的mean和var信息
-    def forward(self, x, mode:str, norm_len=None):
+    # 能不能加上只对前半部分计算norm信息？
+    def forward(self, x, mode:str, norm_len_back=None, norm_len_front=None):
         if mode == 'norm':
-            self._get_statistics(x, norm_len)
+            self._get_statistics(x, norm_len_back, norm_len_front)
             x = self._normalize(x)
         elif mode == 'denorm':
             x = self._denormalize(x)
@@ -33,11 +34,14 @@ class RevIN(nn.Module):
         self.affine_weight = nn.Parameter(torch.ones(self.num_features))
         self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
 
-    def _get_statistics(self, x, norm_len=None):
+    def _get_statistics(self, x, norm_len_back=None, norm_len_front=None):
         dim2reduce = tuple(range(1, x.ndim-1))
-        if norm_len is not None:
-            x = x[:, -norm_len:, :]  # 此时x的shape为[bs, seq_len, channel]
+        assert norm_len_back is None or norm_len_front is None
+        if norm_len_back is not None:
+            x = x[:, -norm_len_back:, :]  # 此时x的shape为[bs, seq_len, channel]
             # print("norm_len:", norm_len)
+        elif norm_len_front is not None:
+            x = x[:, :norm_len_front, :]  # 取出前半部分！
             
         if self.subtract_last:
             self.last = x[:,-1,:].unsqueeze(1)

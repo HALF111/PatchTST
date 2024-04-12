@@ -8,19 +8,17 @@ from torch import Tensor
 import torch.nn.functional as F
 import numpy as np
 
-# from collections import OrderedDict
-from layers.PatchTST_layers import *
-from layers.RevIN import RevIN
-
-
 # https://github.com/luo3300612/Visualizer
 # ! 注意：模型训练时不要调用get_local！！！
 # ! 因为他会存储中间的注意力权重信息，导致这些内存一直没能释放，从而内存泄漏了！！！
 # from visualizer import get_local
 
+#from collections import OrderedDict
+from layers.PatchTST_layers import *
+from layers.RevIN import RevIN
 
 # Cell
-class PatchTST_backbone(nn.Module):
+class Masked_encoder_backbone(nn.Module):
     def __init__(self, 
                  c_in:int, 
                  context_window:int, 
@@ -59,6 +57,8 @@ class PatchTST_backbone(nn.Module):
         
         super().__init__()
         
+        # ! 注意：masked encoder中patch切割必须是non-overlap的！！
+        
         # RevIn
         # 这里默认是做RevIN的，且维度c_in为channel维
         self.revin = revin
@@ -70,26 +70,30 @@ class PatchTST_backbone(nn.Module):
         self.stride = stride
         self.padding_patch = padding_patch
         # 获得总的patch数
-        patch_num = int((context_window - patch_len) / stride + 1)
+        self.input_patch_num = int((context_window - patch_len) / stride + 1)
+        self.output_patch_num = int((target_window - patch_len) / stride + 1)
+        self.total_patch_num = self.input_patch_num + self.output_patch_num
         
         if padding_patch == 'end':  # can be modified to general case
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride)) 
-            patch_num += 1
+            self.input_patch_num += 1
+            # self.output_patch_num += 1  # * 因为预测窗口保证了不需要额外的padding，所以这里output_patch_num可能就不需要+1了
         
         # Backbone
         # 核心的Encoder框架
         # （PS：embedding和位置编码也都会在TSTiEncoder内完成）
-        self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
+        self.backbone = TSTiEncoder(c_in, input_patch_num=self.input_patch_num, output_patch_num=self.output_patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                norm=norm,  # 原来的实现
                                 pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
 
         # Head
         # 也即最后一个"展平 & 线性层"
         # 其将(d_model, patch_num)的输入战平后并映射至(1, pred_len)的输出
-        self.head_nf = d_model * patch_num  # d_model和patch总数的乘积，为encoder的输出
+        # ! 注意：这里由于是对预测窗口做输出，所以计算head_nf的时候应当是用output_patch_num！
+        self.head_nf = d_model * self.output_patch_num  # d_model和patch总数的乘积，为encoder的输出
+        
         self.n_vars = c_in  # n_vars就设置为channel数
         self.pretrain_head = pretrain_head  # 默认为False
         self.head_type = head_type  # 默认为"flatten"
@@ -99,10 +103,15 @@ class PatchTST_backbone(nn.Module):
             # 如果要预训练的话，那么改用一个一维卷积的预测头
             self.head = self.create_pretrain_head(self.head_nf, c_in, fc_dropout)  # custom head passed as a partial func with all its kwargs
         elif head_type == 'flatten':
+            # ! 这里现在有两个选择，一个是用Flatten_Head的Masked_encoder_1
+            # ! 另一个是使用Concat_Head的Masked_encoder_2
+            
             # 如果不预训练线性层的话，那么调用Flatten_Head
             # 它会完成：展平 + 线性映射 + dropout （不过这里的dropout默认设置为0）
-            self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
-        
+            # self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
+            proj_dim = self.output_patch_num * self.patch_len
+            self.head = Concat_Head(self.individual, self.n_vars, d_model=d_model, patch_len=patch_len, target_window=target_window, head_dropout=head_dropout)
+    
     
     # @profile
     def forward(self, z):                                                   # z: [bs x nvars x seq_len]
@@ -110,23 +119,27 @@ class PatchTST_backbone(nn.Module):
         # 1、先做RevIN归一化
         if self.revin: 
             z = z.permute(0,2,1)
-            z = self.revin_layer(z, 'norm')  # 需要对着[bs x seq_len x nvars]来做norm
+            z = self.revin_layer(z, 'norm')
             z = z.permute(0,2,1)
             
         # do patching
         # 2、做patching分割
         if self.padding_patch == 'end':
-            z = self.padding_patch_layer(z)
+            z = self.padding_patch_layer(z)  # 在这里对输入做一次padding
+        
         # unfold函数啊按照选定的尺寸与步长来切分矩阵，相当于滑动窗口操作，也即只有卷、没有积
         # 参数为（dim,size,step）：dim表明想要切分的维度，size表明切分块（滑动窗口）的大小，step表明切分的步长
         # 这里用于从一个分批输入的张量中提取滑动的局部块
-        z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)   # z: [bs x nvars x patch_num x patch_len]
-        z = z.permute(0,1,3,2)                                              # z: [bs x nvars x patch_len x patch_num]
+        z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)   # z: [bs x nvars x input_patch_num x patch_len]
+        z = z.permute(0,1,3,2)                                              # z: [bs x nvars x patch_len x input_patch_num]
         
         # model
         # 3、经过encoder主干模型（PS：embedding和位置编码都会在backbone内完成）
-        z = self.backbone(z)                                                # z: [bs x nvars x d_model x patch_num]
+        z = self.backbone(z)                                                # z: [bs x nvars x d_model x total_patch_num]
         # 4、展平 + 线性映射（+dropout）
+        # ! 注意这里应当只对最后的几个patch的embedding做
+        # * 所以要取出最后几个patch的输出
+        z = z[:, :, :, -self.output_patch_num:]                             # z: [bs x nvars x d_model x output_patch_num]
         z = self.head(z)                                                    # z: [bs x nvars x target_window] 
         
         # denorm
@@ -150,7 +163,7 @@ class Flatten_Head(nn.Module):
         super().__init__()
         
         # 最后一个"展平 & 线性层"
-        # 其将(d_model, patch_num)的输入战平后并映射至(1, pred_len)的输出
+        # 其将(d_model, output_patch_num)的输入战平后并映射至(1, pred_len)的输出
         
         self.individual = individual
         self.n_vars = n_vars
@@ -186,11 +199,46 @@ class Flatten_Head(nn.Module):
             x = self.dropout(x)
         return x
         
+
+class Concat_Head(nn.Module):
+    def __init__(self, individual, n_vars, d_model, patch_len, target_window, head_dropout=0):
+        super().__init__()
         
+        # 最后一个"展平 & 线性层"
+        # * 注意：这里是预测窗口中的各个patch共享同一个映射层的
+        # 所以线性层是把(output_patch_num, d_model)映射到(output_patch_num, patch_len)
+        # 然后再concat成(1, pred_len)
+        # * 所以为了保证pred_len=output_patch_num*patch_len，这里在切割patch的时候需要保证non-overlap的
+        
+        self.individual = individual
+        self.n_vars = n_vars
+        self.target_window = target_window
+        
+        if self.individual:
+            pass
+        else:
+            # 将d_model映射到patch_len
+            self.linear = nn.Linear(d_model, patch_len)
+            self.dropout = nn.Dropout(head_dropout)
+            
+    def forward(self, x):                                 # x: [bs x nvars x d_model x output_patch_num]
+        if self.individual:
+            pass
+        else:
+            # 先转置x，再过线性层，再做flatten，最后dropout
+            x = x.permute(0,1,3,2)                        # x: [bs x nvars x output_patch_num x d_model]
+            # print("x.shape:", x.shape)
+            x = self.linear(x)                            # x: [bs x nvars x output_patch_num x patch_len]
+            x = x.reshape(x.shape[0], x.shape[1], -1)     # x: [bs x nvars x (patch_num * patch_len)]，也即[bs x nvars x pred_len]
+            # print("x.shape[-1]:", x.shape[-1])
+            # print("self.target_window:", self.target_window)
+            assert x.shape[-1] == self.target_window      # 需要保证patch_num * patch_len == pred_len
+            x = self.dropout(x)
+        return x
     
     
 class TSTiEncoder(nn.Module):  # "i" means channel-independent
-    def __init__(self, c_in, patch_num, patch_len, max_seq_len=1024,
+    def __init__(self, c_in, input_patch_num, output_patch_num, patch_len, max_seq_len=1024,
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
                  d_ff=256, norm='BatchNorm', attn_dropout=0., dropout=0., act="gelu", store_attn=False,
                  key_padding_mask='auto', padding_var=None, attn_mask=None, res_attention=True, pre_norm=False,
@@ -201,11 +249,15 @@ class TSTiEncoder(nn.Module):  # "i" means channel-independent
         
         super().__init__()
         
-        self.patch_num = patch_num
+        self.input_patch_num = input_patch_num
+        self.output_patch_num = output_patch_num
+        self.total_patch_num = self.input_patch_num + self.output_patch_num
         self.patch_len = patch_len
         
         # Input encoding
-        q_len = patch_num
+        # ! 这里要改成total_patch_num！
+        q_len = self.total_patch_num
+        
         # 这里用一个线性层做value-embedding，将输入从patch_len维映射到d_model维
         self.W_P = nn.Linear(patch_len, d_model)        # Eq 1: projection of feature vectors onto a d-dim vector space
         self.seq_len = q_len
@@ -214,6 +266,10 @@ class TSTiEncoder(nn.Module):  # "i" means channel-independent
         # 有很多位置编码备选项，这里默认使用"zeros"，也即初始化为[-0.02,0.02]区间内的均匀分布
         # * 同时，learn_pe为True，说明这里位置编码默认是可学习的
         self.W_pos = positional_encoding(pe, learn_pe, q_len, d_model)
+        
+        # * mask embedding
+        # * 这个就是masked encoder中加在预测窗口中的embedding
+        self.mask = nn.Embedding(1, d_model)  # (1, d_model)
 
         # Residual dropout
         self.dropout = nn.Dropout(dropout)
@@ -225,27 +281,33 @@ class TSTiEncoder(nn.Module):  # "i" means channel-independent
 
     
     # @profile 
-    def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
+    def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x input_patch_num]
         
         n_vars = x.shape[1]
         
         # Input encoding
-        x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x patch_num x patch_len]
+        x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x input_patch_num x patch_len]
         # 1、value-embedding，将输入从patch_len映射到d_model
-        x = self.W_P(x)                                                          # x: [bs x nvars x patch_num x d_model]
+        x = self.W_P(x)                                                          # x: [bs x nvars x input_patch_num x d_model]
+        
+        # 2、加上预测窗口中的mask部分
+        # self.mask: [1, d_model]
+        mask_token = self.mask.weight.unsqueeze(0).unsqueeze(0)  # mask_token: [1, 1, 1, d_model]
+        mask_token = mask_token.repeat(x.shape[0], x.shape[1], self.output_patch_num, 1)  # mask_token: [bs x nvars x output_patch_num x d_model]
+        x = torch.cat((x, mask_token), dim=2)                                    # x: [bs x nvars x total_patch_num x d_model]
 
         # channel independence
-        u = torch.reshape(x, (x.shape[0]*x.shape[1], x.shape[2], x.shape[3]))      # u: [(bs * nvars) x patch_num x d_model]
+        u = torch.reshape(x, (x.shape[0]*x.shape[1], x.shape[2], x.shape[3]))      # u: [(bs * nvars) x total_patch_num x d_model]
         
-        # 2、将embedding和位置编码相加，再经过dropout
-        u = self.dropout(u + self.W_pos)                                         # u: [(bs * nvars) x patch_num x d_model]
+        # 3、将embedding和位置编码W_pos相加，再经过dropout
+        u = self.dropout(u + self.W_pos)                                         # u: [(bs * nvars) x total_patch_num x d_model]
 
         # Encoder
         # 3、进入encoder做处理
-        z = self.encoder(u)                                                      # z: [(bs * nvars) x patch_num x d_model]
+        z = self.encoder(u)                                                      # z: [(bs * nvars) x total_patch_num x d_model]
         
-        z = torch.reshape(z, (-1, n_vars, z.shape[-2], z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]
-        z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
+        z = torch.reshape(z, (-1, n_vars, z.shape[-2], z.shape[-1]))                # z: [bs x nvars x total_patch_num x d_model]
+        z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x total_patch_num]
         
         return z
             
@@ -267,7 +329,7 @@ class TSTEncoder(nn.Module):
 
     # @profile
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
-        output = src  # src: [(bs * nvars) x patch_num x d_model]??
+        output = src
         scores = None
         if self.res_attention:
             for mod in self.layers:
@@ -301,17 +363,10 @@ class TSTEncoderLayer(nn.Module):
         # 第一个是Attention中的norm
         # 注意，PatchTST参考TST的设计，其中默认使用的是BatchNorm
         # 而不像In/Auto/FED-former等默认使用LayerNorm
-        # ! 简单来说就是attention和FFN的norm都是BatchNorm！！
         self.dropout_attn = nn.Dropout(dropout)
         if "batch" in norm.lower():
-            # ! 为什么batchnorm要先转置再做呢？
-            # PS：对于3D的输入数据，BatchNorm1d的参数必须和数据第二维度的数值相同
-            # 其输入为：Input: (N, C)或者(N, C, L)，其中N是batch大小，C是channel数量，L是序列长度
-            # 而这里的输入是(batch_size, patch_num, d_model)，所以需要转置下将d_model放到前面去。
-            # 所以这里是要把d_model放到中间，patch_num放在后面
             self.norm_attn = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
         else:
-            # * layernorm的输入是(N,...)就可以了，LN对于当前batch内数据的所有维度做归一化
             self.norm_attn = nn.LayerNorm(d_model)
 
         # Position-wise Feed-Forward
@@ -325,7 +380,6 @@ class TSTEncoderLayer(nn.Module):
         # 第二个是FFN中的Norm，同样也是默认为BatchNorm，也可能是LayerNorm
         self.dropout_ffn = nn.Dropout(dropout)
         if "batch" in norm.lower():
-            # ! 为什么batchnorm要先转置再做呢？
             self.norm_ffn = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
         else:
             self.norm_ffn = nn.LayerNorm(d_model)
@@ -338,12 +392,10 @@ class TSTEncoderLayer(nn.Module):
     # @get_local('attn')
     # @profile
     def forward(self, src:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None) -> Tensor:
-        # src: [(bs * nvars) x patch_num x d_model]??
 
         # Multi-Head attention sublayer
         # 1、在注意力前先做一个BatchNorm（也可能是LayerNorm？）
-        # * 不过self.pre_norm默认为False，也就是默认是在add之后做post的normalization？？
-        # * 而不是在attention之前做pre的norm。
+        # 不过self.pre_norm默认为False，也就是默认不做normalization？？
         if self.pre_norm:
             src = self.norm_attn(src)
         ## Multi-Head attention
@@ -359,8 +411,6 @@ class TSTEncoderLayer(nn.Module):
         src = src + self.dropout_attn(src2)  # Add: residual connection with residual dropout
         # 3.2 Norm：然后也做一个BatchNorm（也可能是LayerNorm）
         if not self.pre_norm:
-            # print(src.shape)
-            # print(self.norm_attn)
             src = self.norm_attn(src)
 
         # Feed-forward sublayer

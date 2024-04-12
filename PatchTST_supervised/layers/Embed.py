@@ -8,7 +8,9 @@ import math
 class PositionalEmbedding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super(PositionalEmbedding, self).__init__()
-        # Compute the positional encodings once in log space.
+        
+        # PositionalEmbedding和Transformer中的位置编码基本是一样的，也是用sin和cos来编码
+        # Compute the positional encodings once in log space
         pe = torch.zeros(max_len, d_model).float()
         pe.require_grad = False
 
@@ -19,10 +21,10 @@ class PositionalEmbedding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
 
         pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        self.register_buffer('pe', pe)  # 感觉像是把pe的值存下来，避免每次调用时的重复计算？
 
     def forward(self, x):
-        return self.pe[:, :x.size(1)]
+        return self.pe[:, :x.size(1)]  # x.size(1)一般是输入长度seq_len的那一个维度
 
 
 class TokenEmbedding(nn.Module):
@@ -113,8 +115,12 @@ class DataEmbedding(nn.Module):
             d_model=d_model, embed_type=embed_type, freq=freq)
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, x, x_mark):
-        x = self.value_embedding(x) + self.temporal_embedding(x_mark) + self.position_embedding(x)
+    def forward(self, x, x_mark=None):
+        if x_mark is None:
+            # 如果x_mark为None，则表明不需要covariate信息
+            x = self.value_embedding(x) + self.position_embedding(x)
+        else:
+            x = self.value_embedding(x) + self.temporal_embedding(x_mark) + self.position_embedding(x)
         return self.dropout(x)
 
 
