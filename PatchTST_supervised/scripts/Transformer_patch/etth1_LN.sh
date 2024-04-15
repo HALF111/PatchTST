@@ -5,8 +5,8 @@ data_name=ETTh1
 
 # seq_len=104
 # model_name=PatchTST
-model_name=Transformer
-# model_name=Transformer_patch
+# model_name=Transformer
+model_name=Transformer_patch
 
 gpu_num=3
 

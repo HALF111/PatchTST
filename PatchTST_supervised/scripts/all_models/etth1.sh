@@ -12,7 +12,10 @@ gpu_num=3
 
 random_seed=2021
 
-for model_name in Transformer
+for model_name in Transformer_patch Transformer_patch_autoregressive Decoder_autoregressive Decoder_direct
+do
+for norm in layer batch
+do
 for seq_len in 336
 do
 for pred_len in 96
@@ -37,13 +40,14 @@ do
       --d_model 512 \
       --des 'Exp' \
       --itr 1 \
-      --learning_rate 0.0003 \
       --train_epochs 20\
       --patch_len 16 \
       --stride 16 \
       --gpu $gpu_num \
       --batch_size 32 \
       --run_train --run_test \
-      --norm batch
+      --norm $norm
+done
+done
 done
 done
